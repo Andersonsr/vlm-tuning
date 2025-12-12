@@ -1,0 +1,23 @@
+model:
+  name: 'CLIP:ViT-B/32'
+  temperature: 100
+  apply_lora: true
+  lora:
+    rank: 16
+    alpha: 32
+#    dropout: 0.5
+  adapter: false
+  calibrate: false
+  load_weights: false # false or path to file
+  train_temperature: false
+train:
+  batch_size: 64
+  epochs: 200
+  learning_rate: 0.0005
+dataset:
+  name: 'nwpu'
+  root: 'D:\\datasets\\nwpu\\'
+  train_annotation: 'train.json'
+  val_annotation: 'val.json'
+output_dir: 'D:\\checkpoints\\NWPU_CLIPb32_lora_inf_notemp\\'
+log_interval: 100
