@@ -2,12 +2,13 @@ import sys, os
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from encoders import CLIP
-from loratorch import mark_only_lora_as_trainable
-from lora import apply_lora_attn_mlp
+from lora import apply_lora
+from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers
 import torch
+from model.adapter import residual_adapter
 
 
-def createModel(conf):
+def createModel(conf,):
     parts = conf.name.split(':')
     if parts[0] == 'CLIP':
         model = CLIP(conf)
@@ -15,16 +16,19 @@ def createModel(conf):
         raise ValueError(f'Invalid model name {conf.name}')
 
     # print(model)
-    if conf.apply_lora:
+    if conf.lora.apply:
         print('Applying Lora')
-        model.model = apply_lora_attn_mlp(model.model, 'visual', conf.lora.rank, conf.lora.alpha, False, True)
-        model.model = apply_lora_attn_mlp(model.model, 'text', conf.lora.rank, conf.lora.alpha, False, True)
+        apply_lora(conf.lora, model.model)
         mark_only_lora_as_trainable(model)
         # print('old logit scales ', model.model.logit_scale.requires_grad)
         model.model.logit_scale.requires_grad = conf.train_temperature
 
-    if conf.adapter:
-        raise NotImplementedError('Adapter not implemented')
+    elif conf.residual_adapter.apply:
+        for param in model.model.parameters():
+            param.requires_grad = False
+
+        model.model.logit_scale.requires_grad = conf.train_temperature
+        residual_adapter(model, conf)
 
     if conf.calibrate:
         raise NotImplementedError('calibration not implemented')
@@ -36,7 +40,6 @@ def createModel(conf):
 
         lora_path = os.path.join(os.path.dirname(conf.load_weights), 'lora.pt')
         if os.path.exists(lora_path):
-            weights = torch.load(lora_path)
-            model.load_state_dict(weights, strict=False)
+            load_lora(conf.lora, get_list_lora_layers(conf.model.lora, model.model))
 
     return model

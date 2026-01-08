@@ -1,6 +1,7 @@
 import pickle
 import torch
 import matplotlib.pyplot as plt
+import numpy as np
 from sympy import Si
 from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
 import pandas as pd
@@ -45,6 +46,29 @@ def SVD(images, texts, name, threshold=0.99):
     plt.ylabel('log (Si)')
     plt.title(f'Effective dimension, threshold = {threshold}')
     plt.savefig(f'plots/distance_{name}.png')
+
+    # mean_i = torch.mean(images, dim=0)
+    # mean_t = torch.mean(texts, dim=0)
+    # max_i, _ = torch.max(images, dim=0)
+    # max_t, _ = torch.max(texts, dim=0)
+    # min_i, _ = torch.min(images, dim=0)
+    # min_t, _ = torch.min(texts, dim=0)
+
+    # plt.clf()
+    # plt.plot(range(len(cov_i)), np.sort(cov_i.diagonal().cpu().numpy())[::-1], label='var image')
+    # plt.plot(range(len(cov_t)), np.sort(cov_t.diagonal().cpu().numpy())[::-1], label='var text')
+    # plt.plot(range(len(mean_i)), mean_i.cpu().numpy(), label=f'mean image')
+    # plt.plot(range(len(mean_t)), mean_t.cpu().numpy(), label=f'mean text')
+    # plt.plot(range(len(max_i)), max_i.cpu().numpy(), label=f'max image')
+    # plt.plot(range(len(max_t)), max_t.cpu().numpy(), label=f'max text')
+    # plt.plot(range(len(min_i)), min_i.cpu().numpy(), label=f'min image')
+    # plt.plot(range(len(min_t)), min_t.cpu().numpy(), label=f'min text')
+    # plt.ylim(-1.0, 1.0)
+    # plt.legend()
+    # plt.xlabel('index')
+    # # plt.ylabel('Variance')
+    # plt.title(f'stats {name}')
+    # plt.savefig(f'plots/stats_{name}.png')
 
 
 def truncate(images, texts, threshold):
@@ -95,6 +119,16 @@ def retrieval(images, texts, name, labels=None):
         t2i.append(rk(similarities, targets, indexes))
         i2t.append(rk(similarities.T, targets, indexes))
 
+
+    data = {}
+    for i in range(len(ks)):
+        data[('i2t', f'r@{ks[i]}')] = [f'{i2t[i].cpu().item():.3f}']
+
+    for i in range(len(ks)):
+        data[('t2i', f'r@{ks[i]}')] = [f'{t2i[i].cpu().item():.3f}']
+
+    print(pd.DataFrame(data))
+
     plt.clf()
     plt.plot(ks, t2i, label='text to image')
     plt.plot(ks, i2t, label='image to text')
@@ -121,33 +155,20 @@ def similarity(images, texts):
 
 
 if __name__ == '__main__':
-    data = pickle.load(open("D:\\checkpoints\\NWPU_CLIPb32_lora_inf\\nwpu_test.pkl", 'rb'))
+    data = pickle.load(open("D:\\checkpoints\\NWPU_CLIPb32_adapter_ideal\\nwpu_test.pkl", 'rb'))
     # data = pickle.load(open("D:\\CLIP_embeddings\\nwpu_test.pkl", 'rb'))
-
-    # labels from name
-    labels_discrete = {}
-    labels = []
-    k = 0
-    for image in data['image']:
-        label = '_'.join(image.split('_')[:-1])
-        if label not in labels_discrete.keys():
-            labels_discrete[label] = k
-            k += 1
-
-        labels.append(labels_discrete[label])
-
-    print(labels_discrete)
 
     images = data['image_embeddings']
     texts = data['text_embeddings']
-    print(images.shape, texts.shape)
+    # print(images.shape, texts.shape)
 
     centroid_distance, pairwise_distance = gap_distance(images, texts)
     _, mean_positive_similarity, mean_negative_similarity = similarity(images, texts)
-    print(mean_positive_similarity.detach().cpu().item(),
-          mean_negative_similarity.detach().cpu().item(),
-          centroid_distance.detach().cpu().item(),
-          pairwise_distance.detach().cpu().item())
+    data = {'positive sim.': [f'{mean_positive_similarity.cpu().item():.3f}'],
+            'negative sim.': [f'{mean_negative_similarity.cpu().item():.3f}'],
+            'centroid dist.': [f'{centroid_distance.detach().cpu().item():.3f}'],
+            'pairwise dist.': [f'{pairwise_distance.detach().cpu().item():.3f}']}
 
-    SVD(images, texts, 'NWPU LoRA 200 epochs')
-    retrieval(images, texts, 'NWPU LoRA 200 epochs')
+    print(pd.DataFrame(data))
+    SVD(images, texts, 'NWPU adapter ideal temperature')
+    retrieval(images, texts, 'NWPU adapter ideal temperature')

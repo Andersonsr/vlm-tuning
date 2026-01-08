@@ -1,6 +1,7 @@
-ed.py
+save_and_load.py
 steam_data.json
 steam.csv
 plots
 results*
-
+idealTemp.py
+*/__pycache__

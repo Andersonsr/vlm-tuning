@@ -27,10 +27,34 @@ class CLIP(nn.Module):
 
         return torch.stack(inputs)
 
+    def encode_image(self, image):
+        x = self.model.encode_image(image)
+        if hasattr(self, 'vision_adapter'):
+            x = self.vision_adapter(x)
+        return x
+
+    def encode_text(self, text):
+        x = self.model.encode_text(text)
+        if hasattr(self, 'text_adapter'):
+            x = self.text_adapter(x)
+        return x
+
+    def set_temperature(self, temperature):
+        new_temp = torch.nn.Parameter(torch.log(torch.ones(1) * temperature),requires_grad=self.model.logit_scale.requires_grad)
+        self.model.logit_scale = new_temp
+        self.model.logit_scale.to()
+
     def forward(self, image, text):
         ce = torch.nn.CrossEntropyLoss()
         image_features = self.model.encode_image(image)
         text_features = self.model.encode_text(text)
+
+        # adapters
+        if hasattr(self, 'vision_adapter'):
+            image_features = self.vision_adapter(image_features)
+
+        if hasattr(self, 'text_adapter'):
+            text_features = self.text_adapter(text_features)
 
         # normalized features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -38,7 +62,7 @@ class CLIP(nn.Module):
 
         # cosine similarity as logits
         logit_scale = self.model.logit_scale.exp()
-        logits_per_image = logit_scale * image_features @ text_features.t()
+        logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
         logits_per_text = logits_per_image.t()
 
         ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)

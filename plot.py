@@ -42,14 +42,16 @@ def plot_train(log, name):
 
     val_loss = data['validation loss']
     train_loss = data['training loss']
+    print('min temperature: ', min(data['temperature']))
 
     val_interval = len(train_loss) / len(val_loss)
 
-    plt.plot([(i+1)*val_interval for i in range(len(val_loss))], val_loss, label='validation loss')
-    plt.plot(range(1, len(train_loss)+1), train_loss, label='training loss')
-    # plt.plot(range(len(data['accuracy'])), np.array(data['accuracy']) * 100, label='accuracy * 100')
-    # plt.plot(range(len(data['confidence'])), np.array(data['confidence']) * 100, label='confidence * 100')
-    # plt.plot(range(len(data['temperature'])), data['temperature'], label='temperature')
+    # plt.plot([(i+1)*val_interval for i in range(len(val_loss))], val_loss, label='validation loss')
+    # plt.plot(range(1, len(train_loss)+1), train_loss, label='training loss')
+    plt.plot(range(len(data['accuracy'])), np.array(data['accuracy']) * 100, label='accuracy * 100')
+    plt.plot(range(len(data['confidence'])), np.array(data['confidence']) * 100, label='confidence * 100')
+    plt.plot(range(len(data['temperature'])), data['temperature'], label='temperature')
+
     plt.legend()
     plt.title(f'training log: {name}')
     plt.xlabel('step')
@@ -58,5 +60,5 @@ def plot_train(log, name):
 
 if __name__ == '__main__':
     # plot_metrics('results_nwpu.xlsx')
-    plot_train('D:\\checkpoints\\NWPU_CLIPb32_lora_inf\\training.log', 'NWPU LoRA 200 epochs new')
-
+    plot_train('D:\\checkpoints\\NWPU_CLIPb32_adapter_ideal\\training.log', 'NWPU adapter+cooling ideal 100 epochs')
+    

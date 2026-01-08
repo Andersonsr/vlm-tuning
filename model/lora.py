@@ -1,9 +1,26 @@
 # code from LoRA-Torch repository
 # https://github.com/Baijiong-Lin/LoRA-Torch/blob/main/examples/Finetune_open_clip_with_LoRA_Torch_on_CIFAR10.ipynb
-import loratorch as lora
+import loratorch
+from lora_utils import apply_lora as cliplora, mark_only_lora_as_trainable
+import types
 
 
-def apply_lora_attn_mlp(model, encoder_type='visual', rank=16, lora_alpha=32, mlp=True, attn=True):
+def apply_lora(args, model):
+    cliplora(args, model)
+    mark_only_lora_as_trainable(model)
+
+
+def apply_lora_old(model, encoder_type='visual', rank=16, lora_alpha=32, mlp=False, attn=True):
+    '''
+    apply loratorch to attention layers
+    :param model: torch model
+    :param encoder_type: visual or text
+    :param rank: lora rank default to 16
+    :param lora_alpha: lora alpha default to 32
+    :param mlp: apply lora to mlp, default to true
+    :param attn: apply lora to attention, default to true
+    :return:
+    '''
     if encoder_type == 'visual':
         encoder = model.visual.transformer
     elif encoder_type == 'text':
@@ -15,7 +32,7 @@ def apply_lora_attn_mlp(model, encoder_type='visual', rank=16, lora_alpha=32, ml
     for i, resblock in enumerate(encoder.resblocks):
         if hasattr(resblock, 'attn') and attn:
             multihead = resblock.attn
-            lora_multihead = lora.MultiheadAttention(r=rank,
+            lora_multihead = loratorch.MultiheadAttention(r=rank,
                                     lora_alpha=lora_alpha,
                                     enable_lora=enable_lora,
                                     embed_dim=multihead.embed_dim,
@@ -33,14 +50,14 @@ def apply_lora_attn_mlp(model, encoder_type='visual', rank=16, lora_alpha=32, ml
         if hasattr(resblock, 'mlp') and mlp:
             old_mlp_fc=resblock.mlp.c_fc
             old_mlp_proj=resblock.mlp.c_proj
-            new_mlp_fc = lora.Linear(
+            new_mlp_fc = loratorch.Linear(
                 old_mlp_fc.in_features,
                 old_mlp_fc.out_features,
                 bias=True if hasattr(old_mlp_fc, "bias") else False,
                 r=rank,
                 lora_alpha=lora_alpha,
             )
-            new_mlp_proj = lora.Linear(
+            new_mlp_proj = loratorch.Linear(
                 old_mlp_proj.in_features,
                 old_mlp_proj.out_features,
                 bias=True if hasattr(old_mlp_proj, "bias") else False,
@@ -52,5 +69,5 @@ def apply_lora_attn_mlp(model, encoder_type='visual', rank=16, lora_alpha=32, ml
             resblock.mlp.c_fc = new_mlp_fc
             resblock.mlp.c_proj = new_mlp_proj
 
-    lora.mark_only_lora_as_trainable(model)
+    loratorch.mark_only_lora_as_trainable(model)
     return model

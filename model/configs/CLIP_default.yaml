@@ -1,23 +1,34 @@
 model:
   name: 'CLIP:ViT-B/32'
   temperature: 100
-  apply_lora: true
   lora:
-    rank: 16
+    apply: true
+    r: 16
     alpha: 32
-#    dropout: 0.5
-  adapter: false
+    dropout_rate: 0.5
+    params: ['q', 'k', 'v', 'o']
+    encoder: 'both' # both,
+    position: 'all'
+  residual_adapter:
+    apply: false
+    target: 'both' # 'vision', 'text', 'both'
+    alpha: 0.5
+    bottleneck_reduction: 4
   calibrate: false
   load_weights: false # false or path to file
-  train_temperature: false
+  train_temperature: true
 train:
   batch_size: 64
-  epochs: 200
+  epochs: 100
   learning_rate: 0.0005
+  cooling:
+    apply: false # 'step', 'linear' or false
+    final_temp: 34.723667
+    iterations: 40000
 dataset:
   name: 'nwpu'
   root: 'D:\\datasets\\nwpu\\'
   train_annotation: 'train.json'
   val_annotation: 'val.json'
-output_dir: 'D:\\checkpoints\\NWPU_CLIPb32_lora_inf_notemp\\'
+output_dir: 'D:\\checkpoints\\NWPU_CLIPb32_lora2_temp\\'
 log_interval: 100

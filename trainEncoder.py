@@ -1,16 +1,18 @@
-import sys
-from loratorch import register_model_param_after_backward, lora_state_dict
 from omegaconf import OmegaConf
 import argparse
 import os
 from dataset.captionDataset import CaptionDataset
 import torch
 from math import ceil
+from model.lora_utils import save_lora, get_lora_parameters, get_list_lora_layers
 from model.createModel import createModel
-from torch.optim import AdamW
+from torch.optim import AdamW, Adam
 from tqdm import tqdm
+from model.schedulers import LinearScheduler, StepScheduler
+
 
 PBAR = None
+COOLING = None
 
 
 def trainEpoch(loader, model, optim, conf, device):
@@ -28,7 +30,9 @@ def trainEpoch(loader, model, optim, conf, device):
         optim.zero_grad()
         loss.backward()
         optim.step()
-        register_model_param_after_backward(model)
+        if COOLING is not None:
+            temperature = COOLING.update()
+            model.set_temperature(temperature)
 
         probs = scaled_logits.softmax(dim=-1)
         confidence, pred = probs.max(dim=-1)
@@ -82,28 +86,44 @@ if __name__ == '__main__':
     conf = OmegaConf.load(args.config)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    print("using device: ", device)
     os.makedirs(conf.output_dir, exist_ok=True)
     file = open(os.path.join(conf.output_dir, 'training.log'), 'w')
     file.close()
 
+    conf.model.lora.backbone = conf.model.name.split(':')[-1]
+    conf.model.lora.save_path = conf.output_dir
+    OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, 'config.yaml'))
+
     model = createModel(conf.model).to(device)
     model.learnable_parameters()
-    # model.temperature = model.temperature.to(device)
 
     train_dataset = CaptionDataset(conf.dataset.root, conf.dataset.train_annotation, conf.dataset.name)
     val_dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name)
     print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
 
-    optimizer = AdamW(model.parameters(), lr=conf.train.learning_rate)
+    # model.parameters()
+    optimizer = Adam(model.parameters(), lr=conf.train.learning_rate)
+
     os.makedirs(conf.output_dir, exist_ok=True)
     conf.model.load_weights = os.path.join(conf.output_dir, 'checkpoint.pt')
-    OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, 'config.yaml'))
 
     train_steps = len(train_dataset) / conf.train.batch_size
     val_steps = len(val_dataset) / conf.train.batch_size
     PBAR = tqdm(total=(ceil(train_steps) + ceil(val_steps)) * conf.train.epochs)
     best_val_loss = float('inf')
+
+    if conf.train.cooling.apply:
+        t1 = 100
+        n1 = 32768
+        n2 = conf.train.batch_size
+        t2 = conf.train.cooling.final_temp
+
+        if conf.train.cooling.apply == 'linear':
+            COOLING = LinearScheduler(conf.model.temperature, t2, conf.train.cooling.iterations)
+        if conf.train.cooling.apply == 'step':
+            COOLING = StepScheduler(conf.model.temperature, t2, conf.train.cooling.iterations)
+        print('using cooling type: {}'.format(type(COOLING)) if COOLING else 'None')
 
     for epoch in range(conf.train.epochs):
         train_loader = train_dataset.get_loader(conf.train.batch_size)
@@ -112,7 +132,7 @@ if __name__ == '__main__':
         val_loader = val_dataset.get_loader(conf.train.batch_size)
         loss = validationEpoch(val_loader, model, conf, device)
 
-        if conf.model.apply_lora:
-            torch.save(lora_state_dict(model), os.path.join(conf.output_dir, 'lora.pt'))
+        if conf.model.lora.apply:
+            save_lora(conf.model.lora, get_list_lora_layers(conf.model.lora, model.model))
 
         torch.save(model.state_dict(), os.path.join(conf.output_dir, 'checkpoint.pt'))
