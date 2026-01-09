@@ -6,6 +6,7 @@ import torch
 from math import ceil
 from model.lora_utils import save_lora, get_lora_parameters, get_list_lora_layers
 from model.createModel import createModel
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.optim import AdamW, Adam
 from tqdm import tqdm
 from model.schedulers import LinearScheduler, StepScheduler
@@ -85,8 +86,25 @@ if __name__ == '__main__':
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("using device: ", device)
+    if "LOCAL_RANK" in os.environ.keys():
+        # using torchrun multigpu
+        rank = int(os.environ["LOCAL_RANK"])
+        if torch.accelerator.is_available():
+            device_type = torch.accelerator.current_accelerator()
+            device = torch.device(f"{device_type}:{rank}")
+            torch.accelerator.set_device_index(rank)
+            print(f"Running on rank {rank} on device {device}")
+        else:
+            device = torch.device("cpu")
+            print(f"Running on device {device}")
+
+        backend = torch.distributed.get_default_backend_for_device(device)
+        torch.distributed.init_process_group(backend=backend, device_id=device)
+
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print("using device: ", device)
+
     os.makedirs(conf.output_dir, exist_ok=True)
     file = open(os.path.join(conf.output_dir, 'training.log'), 'w')
     file.close()
@@ -132,7 +150,16 @@ if __name__ == '__main__':
         val_loader = val_dataset.get_loader(conf.train.batch_size)
         loss = validationEpoch(val_loader, model, conf, device)
 
-        if conf.model.lora.apply:
-            save_lora(conf.model.lora, get_list_lora_layers(conf.model.lora, model.model))
+        if 'LOCAL_RANK' in os.environ:
+            if os.environ['LOCAL_RANK'] == 0:
+                with FSDP.summon_full_params(model, rank0_only=True, offload_to_cpu=True):
+                    if conf.model.lora.apply:
+                        save_lora(conf.model.lora, get_list_lora_layers(conf.model.lora, model.model))
 
-        torch.save(model.state_dict(), os.path.join(conf.output_dir, 'checkpoint.pt'))
+                    torch.save(model.state_dict(), os.path.join(conf.output_dir, 'checkpoint.pt'))
+
+        else:
+            if conf.model.lora.apply:
+                save_lora(conf.model.lora, get_list_lora_layers(conf.model.lora, model.model))
+
+            torch.save(model.state_dict(), os.path.join(conf.output_dir, 'checkpoint.pt'))

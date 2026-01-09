@@ -1,8 +1,8 @@
-import os
 import torch
 import clip
 from PIL import Image
 from torch import nn
+from torch.distributed.fsdp import fully_shard
 
 
 class CLIP(nn.Module):
@@ -78,6 +78,17 @@ class CLIP(nn.Module):
 
         print(f'total params: {total / 1e6:.2f}M,  learnable params: {learnable / 1e6:.2f}M')
         return total, learnable
+
+    def fsdp(self):
+        for block in self.model.visual.transformer.resblocks:
+            fully_shard(block)
+
+        for block in self.model.transformer.resblocks:
+            fully_shard(block)
+
+        fully_shard(self.model.visual)
+        fully_shard(self.model.transformer)
+        fully_shard(self.model)
 
 
 if __name__ == "__main__":

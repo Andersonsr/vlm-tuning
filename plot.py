@@ -60,5 +60,5 @@ def plot_train(log, name):
 
 if __name__ == '__main__':
     # plot_metrics('results_nwpu.xlsx')
-    plot_train('D:\\checkpoints\\NWPU_CLIPb32_adapter_ideal\\training.log', 'NWPU adapter+cooling ideal 100 epochs')
+    plot_train('D:\\checkpoints\\NWPU_CLIPb32_lora2_temp\\training.log', 'NWPU LoRA2+learnable temperature')
     
