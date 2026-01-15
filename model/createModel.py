@@ -9,33 +9,33 @@ from model.adapter import residual_adapter
 
 
 def createModel(conf,):
-    parts = conf.name.split(':')
+    parts = conf.model.name.split(':')
     if parts[0] == 'CLIP':
         model = CLIP(conf)
     else:
         raise ValueError(f'Invalid model name {conf.name}')
 
     # print(model)
-    if conf.lora.apply:
+    if conf.model.lora.apply:
         print('Applying Lora')
-        apply_lora(conf.lora, model.model)
+        apply_lora(conf.model.lora, model.model)
         mark_only_lora_as_trainable(model)
         # print('old logit scales ', model.model.logit_scale.requires_grad)
-        model.model.logit_scale.requires_grad = conf.train_temperature
+        model.model.logit_scale.requires_grad = conf.model.train_temperature
 
-    elif conf.residual_adapter.apply:
+    elif conf.model.residual_adapter.apply:
         for param in model.model.parameters():
             param.requires_grad = False
 
-        model.model.logit_scale.requires_grad = conf.train_temperature
+        model.model.logit_scale.requires_grad = conf.model.train_temperature
         residual_adapter(model, conf)
 
-    if conf.calibrate:
+    if conf.model.calibrate:
         raise NotImplementedError('calibration not implemented')
 
-    if conf.load_weights:
-        print('loading weights from {}'.format(conf.load_weights))
-        weights = torch.load(conf.load_weights)
+    if conf.model.load_weights:
+        print('loading weights from {}'.format(conf.model.load_weights))
+        weights = torch.load(conf.model.load_weights)
         model.load_state_dict(weights, strict=False)
 
         lora_path = os.path.join(os.path.dirname(conf.load_weights), 'lora.pt')

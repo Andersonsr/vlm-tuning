@@ -1,18 +1,30 @@
 import torch
 import clip
 from PIL import Image
-from torch import nn
-from torch.distributed.fsdp import fully_shard
+import lightning as L
+from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
+from model.schedulers import LinearScheduler, StepScheduler
+from torch.optim import AdamW
 
 
-class CLIP(nn.Module):
+class CLIP(L.LightningModule):
     def __init__(self, conf):
         super(CLIP, self).__init__()
-        modelName = conf.name.split(':')[1]
+        modelName = conf.model.name.split(':')[1]
         self.model, self.preprocess = clip.load(modelName, device='cpu')
         self.tokenize = clip.tokenize
-        self.model.logit_scale = torch.nn.Parameter(torch.log(torch.ones(1) * conf.temperature), requires_grad=conf.train_temperature)
-        # print('temperature', self.model.logit_scale)
+        self.model.logit_scale = torch.nn.Parameter(
+            torch.log(torch.ones(1) * conf.model.temperature),
+            requires_grad=conf.model.train_temperature
+        )
+
+        self.cooling = None
+        self.lr = conf.train.learning_rate
+
+        if conf.train.cooling.apply:
+            self.cooling = conf.train.cooling.apply
+            self.target_temperature = conf.train.cooling.final_temp
+            self.cooling_steps = conf.train.cooling.iterations
 
     def prepareImages(self, images: list[str],) -> torch.Tensor:
         """
@@ -39,15 +51,40 @@ class CLIP(nn.Module):
             x = self.text_adapter(x)
         return x
 
-    def set_temperature(self, temperature):
-        new_temp = torch.nn.Parameter(torch.log(torch.ones(1) * temperature),requires_grad=self.model.logit_scale.requires_grad)
+    def update_temperature(self, batch_idx):
+        if self.cooling == 'linear':
+            cooling_rate = (100 - self.target_temperature) / self.cooling_steps
+            temperature = max(100.0 - (batch_idx * cooling_rate), self.target_temperature)
+
+        elif self.cooling == 'step':
+            delta = 100.0 - self.target_temperature
+            num_steps = self.cooling_steps // (delta // 5)
+            cur_step = batch_idx // num_steps
+            temperature = max(self.initial_temperature - (cur_step * 5), self.final_temperature)
+
+        else:
+            raise ValueError(f'Cooling rate {self.cooling} not recognized')
+
+        new_temp = torch.nn.Parameter(torch.log(torch.ones(1) * temperature), requires_grad=False)
         self.model.logit_scale = new_temp
         self.model.logit_scale.to()
 
-    def forward(self, image, text):
-        ce = torch.nn.CrossEntropyLoss()
-        image_features = self.model.encode_image(image)
-        text_features = self.model.encode_text(text)
+    def forward(self, batch):
+        image_features = self.model.encode_image(batch['image'])
+        text_features = self.model.encode_text(batch['text'])
+        return image_features, text_features
+
+    def configure_optimizers(self):
+        return AdamW(self.parameters(), lr=self.lr)
+
+    def validation_step(self, batch, batch_idx):
+        print('Captions', batch['captions'].shape)
+        image_features = self.model.encode_image(batch['images'])
+        text_features = self.model.encode_text(batch['captions'])
+
+        # normalized features
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
         # adapters
         if hasattr(self, 'vision_adapter'):
@@ -56,9 +93,55 @@ class CLIP(nn.Module):
         if hasattr(self, 'text_adapter'):
             text_features = self.text_adapter(text_features)
 
+        # cosine similarity as logits
+        logit_scale = self.model.logit_scale.exp()
+        logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+        logits_per_text = logits_per_image.t()
+
+        ce = torch.nn.CrossEntropyLoss()
+        ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
+        self.log('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2)
+
+        # similarity
+        positive_mean = torch.diagonal(logits_per_image).mean()
+        off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
+        n = logits_per_image.shape[0]
+        negative_mean = off_diagonal.sum() / (n ** 2 - n)
+        self.log('mean_positive_similarity', positive_mean)
+        self.log('mean_negative_similarity', negative_mean)
+
+        #retrieval
+        targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+        indexes = torch.arange(targets.shape[0])
+        indexes = indexes.repeat(targets.shape[0], 1).T
+
+        targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+        indexes = torch.arange(targets.shape[0])
+        indexes = indexes.repeat(targets.shape[0], 1).T
+
+        for k in [1, 5, 10]:
+            rk = RetrievalRecall(top_k=k)
+            self.log(f'i2t r@{k}', rk(logits_per_image, targets, indexes))
+            self.log(f't2i r@{k}', rk(logits_per_image.T, targets, indexes))
+
+    def training_step(self, batch, batch_idx):
+        if self.cooling is not None:
+            self.update_temperature(batch_idx)
+
+        ce = torch.nn.CrossEntropyLoss()
+        image_features = self.model.encode_image(batch['images'])
+        text_features = self.model.encode_text(batch['captions'])
+
         # normalized features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        # adapters
+        if hasattr(self, 'vision_adapter'):
+            image_features = self.vision_adapter(image_features)
+
+        if hasattr(self, 'text_adapter'):
+            text_features = self.text_adapter(text_features)
 
         # cosine similarity as logits
         logit_scale = self.model.logit_scale.exp()
@@ -66,7 +149,7 @@ class CLIP(nn.Module):
         logits_per_text = logits_per_image.t()
 
         ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
-        return (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2, logits_per_image
+        return (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2
 
     def learnable_parameters(self):
         learnable = 0
@@ -78,17 +161,6 @@ class CLIP(nn.Module):
 
         print(f'total params: {total / 1e6:.2f}M,  learnable params: {learnable / 1e6:.2f}M')
         return total, learnable
-
-    def fsdp(self):
-        for block in self.model.visual.transformer.resblocks:
-            fully_shard(block)
-
-        for block in self.model.transformer.resblocks:
-            fully_shard(block)
-
-        fully_shard(self.model.visual)
-        fully_shard(self.model.transformer)
-        fully_shard(self.model)
 
 
 if __name__ == "__main__":

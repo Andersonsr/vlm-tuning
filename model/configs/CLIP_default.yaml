@@ -21,6 +21,8 @@ train:
   batch_size: 64
   epochs: 100
   learning_rate: 0.0005
+  nodes: 1
+  accelerator: 'gpu'
   cooling:
     apply: false # 'step', 'linear' or false
     final_temp: 34.723667

@@ -5,13 +5,16 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader, RandomSampler
 
 
+#TODO: move preprocess function here
 class CaptionDataset(Dataset):
-    def __init__(self, rootDir, annotationFile, dataset):
+    def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer):
         datasets = {
             'coco': os.path.join(rootDir, '{}2017'.format(annotationFile.split('.')[0])),
             'nwpu': os.path.join(rootDir, 'images')
         }
         self.data = json.load(open(os.path.join(rootDir, annotationFile), 'r'))
+        self.preprocess = preprocess
+        self.tokenizer = tokenizer
         try:
             self.root = datasets[dataset]
         except ValueError:
@@ -25,8 +28,8 @@ class CaptionDataset(Dataset):
         k = randint(0, 4)
         # print('SAMPLE', sample)
         return {
-            'images': os.path.join(self.root, sample['image_name']),
-            'captions': sample['captions'][k]
+            'images': self.preprocess([os.path.join(self.root, sample['image_name'])]).squeeze(0),
+            'captions': self.tokenizer(sample['captions'][k]).squeeze(0),
         }
 
     def get_loader(self, batchSize):

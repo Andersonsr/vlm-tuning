@@ -15,6 +15,7 @@ class LinearScheduler:
         self.final_temperature = final_temp
         self.step = 0
 
+
     def update(self):
         temperature = max(self.initial_temperature - (self.step * self.cooling_rate), self.final_temperature)
         self.step += 1

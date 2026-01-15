@@ -116,6 +116,9 @@ if __name__ == '__main__':
     model = createModel(conf.model).to(device)
     model.learnable_parameters()
 
+    if 'LOCAL_RANK' in os.environ:
+        model.fsdp()
+
     train_dataset = CaptionDataset(conf.dataset.root, conf.dataset.train_annotation, conf.dataset.name)
     val_dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name)
     print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
