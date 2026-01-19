@@ -32,7 +32,6 @@ class CaptionDataset(Dataset):
             'captions': self.tokenizer(sample['captions'][k]).squeeze(0),
         }
 
-    def get_loader(self, batchSize):
-        sampler = RandomSampler(self)
-        return DataLoader(self, batch_size=batchSize, sampler=sampler, )
+    def get_loader(self, batchSize, shuffle):
+        return DataLoader(self, batch_size=batchSize, shuffle=shuffle)
 

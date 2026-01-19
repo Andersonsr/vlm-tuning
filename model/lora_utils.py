@@ -47,12 +47,15 @@ def mark_only_lora_as_trainable(model: nn.Module, bias: str = 'none') -> None:
     for n, p in model.named_parameters():
         if 'lora_' not in n:
             p.requires_grad = False
+
     if bias == 'none':
         return
+
     elif bias == 'all':
         for n, p in model.named_parameters():
             if 'bias' in n:
                 p.requires_grad = True
+
     elif bias == 'lora_only':
         for m in model.modules():
             if isinstance(m, LoRALayer) and \
@@ -109,7 +112,7 @@ def get_list_lora_layers(args, clip_model):
         indices = INDEX_POSITIONS_TEXT[args.position]
         text_encoder = clip_model.transformer
         for i, block in enumerate(text_encoder.resblocks):
-            print(f"Residual Attention Block {i}: {block}")
+            # print(f"Residual Attention Block {i}: {block}")
             if i in indices:
                 for name, submodule in block.named_children():
                     if isinstance(submodule, PlainMultiheadAttentionLoRA):
@@ -119,7 +122,7 @@ def get_list_lora_layers(args, clip_model):
         indices = INDEX_POSITIONS_VISION[args.backbone][args.position]
         vision_encoder = clip_model.visual.transformer
         for i, block in enumerate(vision_encoder.resblocks):
-            print(f"Residual Attention Block {i}: {block}")
+            # print(f"Residual Attention Block {i}: {block}")
             if i in indices:
                 for name, submodule in block.named_children():
                     if isinstance(submodule, PlainMultiheadAttentionLoRA):
@@ -133,7 +136,7 @@ def apply_lora(args, clip_model):
         indices = INDEX_POSITIONS_TEXT[args.position]
         text_encoder = clip_model.transformer
         for i, block in enumerate(text_encoder.resblocks):
-            print(f"Residual Attention Block {i}: {block}")
+            # print(f"Residual Attention Block {i}: {block}")
             if i in indices:
                 for name, submodule in block.named_children():
                     if isinstance(submodule, nn.MultiheadAttention):
@@ -146,7 +149,7 @@ def apply_lora(args, clip_model):
         indices = INDEX_POSITIONS_VISION[args.backbone][args.position]
         vision_encoder = clip_model.visual.transformer
         for i, block in enumerate(vision_encoder.resblocks):
-            print(f"Residual Attention Block {i}: {block}")
+            # print(f"Residual Attention Block {i}: {block}")
             if i in indices:
                 for name, submodule in block.named_children():
                     if isinstance(submodule, nn.MultiheadAttention):

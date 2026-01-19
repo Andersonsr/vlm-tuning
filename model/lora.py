@@ -1,13 +1,7 @@
 # code from LoRA-Torch repository
 # https://github.com/Baijiong-Lin/LoRA-Torch/blob/main/examples/Finetune_open_clip_with_LoRA_Torch_on_CIFAR10.ipynb
 import loratorch
-from lora_utils import apply_lora as cliplora, mark_only_lora_as_trainable
 import types
-
-
-def apply_lora(args, model):
-    cliplora(args, model)
-    mark_only_lora_as_trainable(model)
 
 
 def apply_lora_old(model, encoder_type='visual', rank=16, lora_alpha=32, mlp=False, attn=True):

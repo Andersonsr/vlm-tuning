@@ -4,4 +4,6 @@ steam.csv
 plots
 results*
 idealTemp.py
-*/__pycache__/*
+model/__pycache__/*
+dataset/__pycache__/*
+wandb/

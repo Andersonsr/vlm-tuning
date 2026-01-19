@@ -5,7 +5,7 @@ model:
     apply: true
     r: 4
     alpha: 8
-    dropout_rate: 0.5
+    dropout_rate: 0.25
     params: ['q', 'k', 'v', 'o']
     encoder: 'both' # both,
     position: 'all'
@@ -16,15 +16,13 @@ model:
     bottleneck_reduction: 4
   calibrate: false
   load_weights: false # false or path to file
-  train_temperature: true
+  train_temperature: false
 train:
   batch_size: 64
   epochs: 100
   learning_rate: 0.0005
-  nodes: 1
-  accelerator: 'gpu'
   cooling:
-    apply: false # 'step', 'linear' or false
+    apply: linear # 'step', 'linear' or false
     final_temp: 34.723667
     iterations: 40000
 dataset:

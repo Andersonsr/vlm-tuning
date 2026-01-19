@@ -29,6 +29,7 @@ def set_param(curr_mod, name, param=None, mode='update'):
                 p = getattr(curr_mod, name)
                 return p
 
+
 class LoRALayer():
     def __init__(
         self, 
@@ -185,9 +186,8 @@ class LinearLoRA(nn.Linear, LoRALayer):
         super().train(mode)     
         self.lora_train(mode)
 
-        
     def forward(self, x: torch.Tensor, **kwargs):
-        
+
         if self.dropout is None: # do as before
             if self.r > 0 and not self.merged:
                 self.merge_lora_param()
@@ -209,6 +209,7 @@ class LinearLoRA(nn.Linear, LoRALayer):
         else:
             result = original_output
         return result
+
 
 class Conv1d(nn.Conv1d, LoRALayer):
     # LoRA implemented in a Conv1d layer
@@ -395,7 +396,6 @@ class PlainMultiheadAttentionLoRA(nn.Module):
 
         self.scaled_dot_product_attention = F.scaled_dot_product_attention
         
-        
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, dropout_rate=dropout_rate)
         
         # Init qkv as a new lora linear layer 
@@ -517,7 +517,8 @@ class PlainMultiheadAttentionLoRA(nn.Module):
         attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
         if self.batch_first and is_batched:
             return attn_output.transpose(1, 0), None
-        return attn_output, None  
+
+        return attn_output, None
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -528,7 +529,6 @@ class PlainMultiheadAttentionLoRA(nn.Module):
             key: torch.Tensor,
             value: torch.Tensor,
             **kwargs):
-        
 
         return self.forward_module(query, key, value, **kwargs) 
         
