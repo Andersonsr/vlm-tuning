@@ -1,12 +1,10 @@
 import json
 import os.path
-from random import randint, sample
-import numpy as np
+from random import randint
 from torch.utils.data import Dataset, DataLoader
-from torch.utils.data.distributed import DistributedSampler
 
 
-#TODO: move preprocess function here
+
 class CaptionDataset(Dataset):
     def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer):
         datasets = {
@@ -34,6 +32,5 @@ class CaptionDataset(Dataset):
         }
 
     def get_loader(self, batchSize, shuffle):
-        sampler = DistributedSampler(self, shuffle=shuffle)
-        return DataLoader(self, batch_size=batchSize, sampler=sampler, num_workers=15)
+        return DataLoader(self, batch_size=batchSize, shuffle=shuffle, num_workers=15, pin_memory=True)
 

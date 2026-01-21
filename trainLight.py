@@ -6,7 +6,7 @@ from model.createModel import createModel
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.fabric import Fabric
+
 
 
 if __name__ == '__main__':
