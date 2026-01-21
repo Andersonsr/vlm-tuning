@@ -81,7 +81,9 @@ class CLIP(L.LightningModule):
         return image_features, text_features
 
     def on_train_epoch_start(self):
-        self.train()
+        if self.lora:
+            # manual train mode is needed in order to work with CLIP-LoRA layers
+            self.train()
         # self.learnable_parameters()
 
     def configure_optimizers(self):
@@ -111,15 +113,15 @@ class CLIP(L.LightningModule):
 
         ce = torch.nn.CrossEntropyLoss()
         ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
-        self.log('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2)
+        self.log('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2, sync_dist=True)
 
         # similarity
         positive_mean = torch.diagonal(logits_per_image).mean()
         off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
         n = logits_per_image.shape[0]
         negative_mean = off_diagonal.sum() / (n ** 2 - n)
-        self.log('mean_positive_similarity', positive_mean)
-        self.log('mean_negative_similarity', negative_mean)
+        self.log('mean_positive_similarity', positive_mean, sync_dist=True)
+        self.log('mean_negative_similarity', negative_mean, sync_dist=True)
 
         #retrieval
         targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
@@ -132,8 +134,8 @@ class CLIP(L.LightningModule):
 
         for k in [1, 5, 10]:
             rk = RetrievalRecall(top_k=k)
-            self.log(f'i2t r@{k}', rk(logits_per_image, targets, indexes))
-            self.log(f't2i r@{k}', rk(logits_per_image.T, targets, indexes))
+            self.log(f'i2t r@{k}', rk(logits_per_image, targets, indexes), sync_dist=True)
+            self.log(f't2i r@{k}', rk(logits_per_image.T, targets, indexes), sync_dist=True)
 
     def training_step(self, batch, batch_idx):
         if self.cooling is not None:
@@ -167,8 +169,8 @@ class CLIP(L.LightningModule):
         self.manual_backward(loss)
         optim.step()
 
-        self.log('train_loss', loss)
-        self.log('temperature', logit_scale)
+        self.log('train_loss', loss, sync_dist=True)
+        self.log('temperature', logit_scale, sync_dist=True)
 
     def learnable_parameters(self):
         learnable = 0

@@ -28,7 +28,7 @@ if __name__ == '__main__':
 
     t1 = 100
     n1 = 32768
-    n2 = 64
+    n2 = 512
 
     dk = max_logits - mean_logits
 

@@ -1,28 +1,12 @@
 from omegaconf import OmegaConf
 import argparse
 import os
-
-from torch.optim import Optimizer
-
 from dataset.captionDataset import CaptionDataset
-import torch
-from model.lora_utils import save_lora, get_lora_parameters, get_list_lora_layers
 from model.createModel import createModel
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, BaseFinetuning
-from model.lora_utils import mark_only_lora_as_trainable
-
-
-class LoraFinetuning(BaseFinetuning):
-    def __init__(self):
-        super().__init__()
-
-    def freeze_before_training(self, pl_module):
-        mark_only_lora_as_trainable(pl_module)
-
-    def finetune_function(self, pl_module: "pl.LightningModule", epoch: int, optimizer: Optimizer) -> None:
-        pass
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.fabric import Fabric
 
 
 if __name__ == '__main__':
@@ -31,6 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('--nnodes', type=int, default=1, help='Number of nodes available to the job')
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu', 'auto'], help='accelerator used to run the job')
     parser.add_argument('--name', type=str, default='test', help='run name')
+    parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'auto', 'ddp', "deepspeed"])
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
@@ -54,7 +39,7 @@ if __name__ == '__main__':
     wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name)
     checkpoint_callback = ModelCheckpoint(
         monitor="val_loss",  # Quantity to monitor (e.g., "val_loss", "val_acc")
-        dirpath=conf.output_dir,  # Directory to save the checkpoints
+        dirpath=os.path.join(conf.output_dir, args.name),  # Directory to save the checkpoints
         filename="checkpoint-{epoch:02d}",  # Checkpoint file name with dynamic metrics
         save_top_k=3,  # Save the top 3 best models
         mode="min",  # "min" for loss, "max" for accuracy
@@ -62,8 +47,6 @@ if __name__ == '__main__':
     )
 
     callbacks = [checkpoint_callback]
-    # if conf.model.lora.apply:
-    #     callbacks.append(LoraFinetuning())
 
     trainer = L.Trainer(
         max_epochs=conf.train.epochs,
@@ -72,7 +55,8 @@ if __name__ == '__main__':
         num_nodes=args.nnodes,
         logger=wandb_logger,
         callbacks=callbacks,
-        log_every_n_steps=100
+        log_every_n_steps=conf.log_interval,
+        strategy=args.strategy,
     )
 
     trainer.fit(model, train_loader, val_loader, )

@@ -2,7 +2,8 @@ import json
 import os.path
 from random import randint, sample
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, RandomSampler
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 
 #TODO: move preprocess function here
@@ -26,12 +27,13 @@ class CaptionDataset(Dataset):
     def __getitem__(self, index):
         sample = self.data[index]
         k = randint(0, 4)
-        # print('SAMPLE', sample)
+        name = sample['image_name'].replace('\\', '/')
         return {
-            'images': self.preprocess([os.path.join(self.root, sample['image_name'])]).squeeze(0),
+            'images': self.preprocess([os.path.join(self.root, name)]).squeeze(0),
             'captions': self.tokenizer(sample['captions'][k]).squeeze(0),
         }
 
     def get_loader(self, batchSize, shuffle):
-        return DataLoader(self, batch_size=batchSize, shuffle=shuffle)
+        sampler = DistributedSampler(self, shuffle=shuffle)
+        return DataLoader(self, batch_size=batchSize, sampler=sampler, num_workers=15)
 
