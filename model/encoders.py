@@ -157,6 +157,8 @@ class CLIP(L.LightningModule):
 
         # cosine similarity as logits
         logit_scale = self.model.logit_scale.exp()
+        self.log('temperature', logit_scale)
+
         logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
         logits_per_text = logits_per_image.t()
 
@@ -170,7 +172,7 @@ class CLIP(L.LightningModule):
         optim.step()
 
         self.log('train_loss', loss, sync_dist=True)
-        self.log('temperature', logit_scale, sync_dist=True)
+
 
     def learnable_parameters(self):
         learnable = 0

@@ -6,7 +6,7 @@ from model.createModel import createModel
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-
+from lightning.pytorch.strategies import DDPStrategy
 
 
 if __name__ == '__main__':
@@ -15,7 +15,7 @@ if __name__ == '__main__':
     parser.add_argument('--nnodes', type=int, default=1, help='Number of nodes available to the job')
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu', 'auto'], help='accelerator used to run the job')
     parser.add_argument('--name', type=str, default='test', help='run name')
-    parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'auto', 'ddp', "deepspeed"])
+    parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'auto', 'ddp', 'deepspeed', 'ddp_spawn'])
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
@@ -57,6 +57,7 @@ if __name__ == '__main__':
         callbacks=callbacks,
         log_every_n_steps=conf.log_interval,
         strategy=args.strategy,
+        # strategy=DDPStrategy(process_group_backend="gloo")
     )
 
     trainer.fit(model, train_loader, val_loader, )
