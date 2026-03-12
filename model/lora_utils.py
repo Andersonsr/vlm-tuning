@@ -142,7 +142,8 @@ def apply_lora(args, clip_model):
                     if isinstance(submodule, nn.MultiheadAttention):
                         new_multi_head_lora = PlainMultiheadAttentionLoRA(
                             submodule, enable_lora=args.params, r=args.r, lora_alpha=args.alpha, dropout_rate=args.dropout_rate)
-                        setattr(block, name, new_multi_head_lora)
+                        # setattr(submodule, name, new_multi_head_lora)
+                        setattr(block, name, new_multi_head_lora) # original
                         list_lora_layers.append(new_multi_head_lora)
 
     if args.encoder == 'vision' or args.encoder == 'both':

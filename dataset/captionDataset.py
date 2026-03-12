@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class CaptionDataset(Dataset):
-    def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer):
+    def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer, random=False):
         datasets = {
             'coco': os.path.join(rootDir, '{}2017'.format(annotationFile.split('.')[0])),
             'nwpu': os.path.join(rootDir, 'images')
@@ -14,6 +14,7 @@ class CaptionDataset(Dataset):
         self.data = json.load(open(os.path.join(rootDir, annotationFile), 'r'))
         self.preprocess = preprocess
         self.tokenizer = tokenizer
+        self.random = random
         try:
             self.root = datasets[dataset]
         except ValueError:
@@ -24,7 +25,12 @@ class CaptionDataset(Dataset):
 
     def __getitem__(self, index):
         sample = self.data[index]
-        k = randint(0, 4)
+        if self.random:
+            k = randint(0, len(sample['captions'])-1)
+        
+        else:
+            k = 0
+        
         name = sample['image_name'].replace('\\', '/')
         return {
             'images': self.preprocess([os.path.join(self.root, name)]).squeeze(0),

@@ -4,6 +4,7 @@ from PIL import Image
 import lightning as L
 from torchmetrics.retrieval import RetrievalRecall
 from torch.optim import AdamW, Adam
+import loratorch 
 from lora_utils import mark_only_lora_as_trainable
 
 
@@ -13,7 +14,7 @@ class CLIP(L.LightningModule):
         modelName = conf.model.name.split(':')[1]
         self.model, self.preprocess = clip.load(modelName, device='cpu')
         self.tokenize = clip.tokenize
-        self.automatic_optimization = False
+        # self.automatic_optimization = False
 
         self.model.logit_scale = torch.nn.Parameter(
             torch.log(torch.ones(1) * conf.model.temperature),
@@ -23,13 +24,14 @@ class CLIP(L.LightningModule):
         self.train_temperature = conf.model.train_temperature
         self.cooling = None
         self.lr = conf.train.learning_rate
-        self.lora = conf.model.lora.apply
-
+        self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
+    
         if conf.train.cooling.apply:
             self.cooling = conf.train.cooling.apply
             self.target_temperature = conf.train.cooling.final_temp
             self.cooling_steps = conf.train.cooling.iterations
             self.step = 0
+
 
     def prepareImages(self, images: list[str],) -> torch.Tensor:
         """
@@ -58,7 +60,7 @@ class CLIP(L.LightningModule):
 
     def update_temperature(self):
         if self.cooling == 'linear':
-            cooling_rate = (100 - self.target_temperature) / self.cooling_steps
+            cooling_rate = (100.0 - self.target_temperature) / self.cooling_steps
             temperature = max(100.0 - (self.step * cooling_rate), self.target_temperature)
 
         elif self.cooling == 'step':
@@ -70,10 +72,11 @@ class CLIP(L.LightningModule):
         else:
             raise ValueError(f'Cooling rate {self.cooling} not recognized')
 
-        new_temp = torch.nn.Parameter(torch.log(torch.ones(1) * temperature), requires_grad=False)
-        self.model.logit_scale = new_temp
+        new_temp = torch.nn.Parameter(torch.log(torch.ones(1) * temperature)) #, requires_grad=self.train_temperature)
+        with torch.no_grad():
+            self.model.logit_scale.copy_(new_temp)
+
         self.step += 1
-        # self.model.logit_scale.to()
 
     def forward(self, batch):
         image_features = self.encode_image(batch['image'])
@@ -81,10 +84,20 @@ class CLIP(L.LightningModule):
         return image_features, text_features
 
     def on_train_epoch_start(self):
-        if self.lora:
-            # manual train mode is needed in order to work with CLIP-LoRA layers
-            self.train()
-        # self.learnable_parameters()
+        super().on_train_epoch_start()
+        self.train()
+        
+        if self.lora == 'cliplora':
+            mark_only_lora_as_trainable(self.model)
+            self.model.logit_scale.requires_grad = self.train_temperature
+        
+        elif self.lora == 'loratorch':
+            loratorch.mark_only_lora_as_trainable(self.model)
+            self.model.logit_scale.requires_grad = self.train_temperature
+
+    def on_after_backward(self):
+        if self.lora == 'loratorch':
+            loratorch.register_model_param_after_backward(self.model)
 
     def configure_optimizers(self):
         # params = get_lora_parameters(self)
@@ -98,6 +111,14 @@ class CLIP(L.LightningModule):
         # normalized features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        image_centroid = image_features.mean(dim=0)
+        texts_centroid = text_features.mean(dim=0)
+
+        centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
+        pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
+        self.log('centroid distance', centroid_distance, sync_dist=True)
+        self.log('pairwise distance', pairwise_distance, sync_dist=True)
 
         # adapters
         if hasattr(self, 'vision_adapter'):
@@ -143,11 +164,25 @@ class CLIP(L.LightningModule):
 
         image_features = self.encode_image(batch['images'])
         text_features = self.encode_text(batch['captions'])
+        world_size = self.trainer.world_size
 
+        # TODO: check how global and local loss works
+        # local loss + gather_with_grad = global_loss + gather
+        if world_size > 1:
+            dim = image_features.shape[-1]
+            gathered_image_features = self.all_gather(image_features) #, sync_grads=True)
+            gathered_text_features = self.all_gather(text_features) #, sync_grads=True)
+        
+            gathered_image_features[self.global_rank] = image_features
+            gathered_text_features[self.global_rank] = text_features
+
+            image_features = gathered_image_features.view(-1, dim)
+            text_features = gathered_text_features.view(-1, dim)
+        
         # normalized features
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-
+        
         # adapters
         if hasattr(self, 'vision_adapter'):
             image_features = self.vision_adapter(image_features)
@@ -164,15 +199,10 @@ class CLIP(L.LightningModule):
 
         ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
         ce = torch.nn.CrossEntropyLoss()
-        loss = (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2
-
-        optim = self.optimizers()
-        optim.zero_grad()
-        self.manual_backward(loss)
-        optim.step()
-
+        loss = (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2   
+        
         self.log('train_loss', loss, sync_dist=True)
-
+        return loss
 
     def learnable_parameters(self):
         learnable = 0

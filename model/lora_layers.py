@@ -76,10 +76,9 @@ class LoRALayer():
 
     def merge_BA(self, param_name: str):
         lora_name = self.params_with_lora[param_name]
+        print('SHAPE', eval(f'self.{param_name}').shape)
         return self.transpose((eval(f'self.{lora_name}_lora_B') @ eval(f'self.{lora_name}_lora_A')).view(eval(f'self.{param_name}').shape))
 
-    
-   
     
     def merge_lora_param(self):
         r"""p_new = p + scaling * B @ A and keep differentiable to A and B"""
@@ -187,7 +186,6 @@ class LinearLoRA(nn.Linear, LoRALayer):
         self.lora_train(mode)
 
     def forward(self, x: torch.Tensor, **kwargs):
-
         if self.dropout is None: # do as before
             if self.r > 0 and not self.merged:
                 self.merge_lora_param()

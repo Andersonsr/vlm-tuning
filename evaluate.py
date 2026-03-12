@@ -6,6 +6,9 @@ from sympy import Si
 from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
 import pandas as pd
 from sklearn.decomposition import TruncatedSVD
+from model.encoders import CLIP
+import lightning as l 
+import argparse
 
 
 def gap_distance(images, texts):
@@ -152,15 +155,15 @@ def similarity(images, texts):
     negative_mean = off_diagonal.sum() / (n**2 - n)
 
     return mean, positive_mean, negative_mean
-
+   
 
 if __name__ == '__main__':
-    data = pickle.load(open("D:\\checkpoints\\NWPU_CLIPb32_adapter_ideal\\nwpu_test.pkl", 'rb'))
-    # data = pickle.load(open("D:\\CLIP_embeddings\\nwpu_test.pkl", 'rb'))
+    parser = argparse.ArgumentParser()    
+    parser.add_argument('--checkpoint', type=str,help='checkpoint path')
 
-    images = data['image_embeddings']
-    texts = data['text_embeddings']
-    # print(images.shape, texts.shape)
+    args = parser.parse_args()
+    checkpoint = args.checkpoint
+    CLIP.load_from_checkpoint(checkpoint)
 
     centroid_distance, pairwise_distance = gap_distance(images, texts)
     _, mean_positive_similarity, mean_negative_similarity = similarity(images, texts)

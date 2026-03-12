@@ -7,3 +7,6 @@ idealTemp.py
 model/__pycache__/*
 dataset/__pycache__/*
 wandb/
+logs/
+model/configs/*temp.yaml
+runTrain.sh
