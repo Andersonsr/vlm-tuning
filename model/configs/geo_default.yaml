@@ -1,0 +1,40 @@
+model:
+  name: 'CLIP:ViT-L/14' # LongCLIP:longclip-L 'CLIP:ViT-L/14' 
+  temperature: 100.0
+  lora:
+    apply: true
+    lib: 'loratorch' # loratorch or cliplora
+    r: 4
+    alpha: 16
+    dropout_rate: 0.25
+    params: ['q', 'k', 'v', 'o']
+    encoder: 'both' # both, vision, text
+    position: 'all'
+  residual_adapter:
+    apply: false
+    target: 'both' # 'vision', 'text', 'both'
+    alpha: 0.5
+    bottleneck_reduction: 4
+  calibrate: false
+  load_weights: false # false or path to file
+  train_temperature: false
+train:
+  batch_size: 128 # * n_gpus
+  epochs: 25
+  learning_rate: 0.0005
+  monitor: 'composition_val_loss'
+  cooling:
+    apply: false # 'step', 'linear' or false
+    final_temp: 59.32769 
+    iterations: 0.9 # cooling duration, total batches ratio
+dataset:
+  name: 'geo' # 'nwpu', 'coco', 'geo'
+  root: '/nethome/atena_projetos/fibz/data/Dataset/'
+  train_annotation: 'v2/train.csv'
+  val_annotation: 'v2/val.csv'
+  random: True
+  geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_index_val: [1, 2, 3]
+  geo_group: '2+3' # '2+3', '1', '2', '3'
+output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+log_interval: 6

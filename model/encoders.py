@@ -1,11 +1,18 @@
 import torch
 import clip
-from PIL import Image
+import os
+from PIL import Image, ImageFile
 import lightning as L
 from torchmetrics.retrieval import RetrievalRecall
 from torch.optim import AdamW, Adam
 import loratorch 
-from lora_utils import mark_only_lora_as_trainable
+from model.lora_utils import mark_only_lora_as_trainable
+from model.adapter import residual_adapter
+from LongCLIP.model import longclip
+from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers, apply_lora
+from loratorch_utils import apply_lora_attn_mlp
+from dataset.datasets import GEO_INDICES
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class CLIP(L.LightningModule):
@@ -15,23 +22,44 @@ class CLIP(L.LightningModule):
         self.model, self.preprocess = clip.load(modelName, device='cpu')
         self.tokenize = clip.tokenize
         # self.automatic_optimization = False
+        if conf.dataset.name == 'geo':
+            self.multi_val = True
+            self.geo_indices_val = conf.dataset.geo_index_val
 
         self.model.logit_scale = torch.nn.Parameter(
             torch.log(torch.ones(1) * conf.model.temperature),
             requires_grad=conf.model.train_temperature
         )
-
+        
         self.train_temperature = conf.model.train_temperature
         self.cooling = None
         self.lr = conf.train.learning_rate
         self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
-    
+        # print(self.model)
+
         if conf.train.cooling.apply:
             self.cooling = conf.train.cooling.apply
             self.target_temperature = conf.train.cooling.final_temp
             self.cooling_steps = conf.train.cooling.iterations
             self.step = 0
 
+        if conf.model.lora.apply:
+            if conf.model.lora.lib == 'cliplora':
+                apply_lora(conf.model.lora, self.model)
+                mark_only_lora_as_trainable(self)
+
+            elif conf.model.lora.lib == 'loratorch':
+                self.model = apply_lora_attn_mlp(self.model, conf.model.lora)
+                
+        elif conf.model.residual_adapter.apply:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+            residual_adapter(self.model, conf)
+
+        if conf.model.calibrate:
+            raise NotImplementedError('calibration not implemented')
+        
 
     def prepareImages(self, images: list[str],) -> torch.Tensor:
         """
@@ -78,11 +106,11 @@ class CLIP(L.LightningModule):
 
         self.step += 1
 
-    def forward(self, batch):
+    def forward(self, batch,):
         image_features = self.encode_image(batch['image'])
         text_features = self.encode_text(batch['text'])
         return image_features, text_features
-
+    
     def on_train_epoch_start(self):
         super().on_train_epoch_start()
         self.train()
@@ -104,59 +132,65 @@ class CLIP(L.LightningModule):
         params = filter(lambda p: p.requires_grad, self.parameters())
         return Adam(params, lr=self.lr)
 
-    def validation_step(self, batch, batch_idx):
-        image_features = self.model.encode_image(batch['images'])
-        text_features = self.model.encode_text(batch['captions'])
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        dataset = ''
+        if self.multi_val:
+            dataset = '{}_'.format(GEO_INDICES[self.geo_indices_val[dataloader_idx]])
+        
+        with torch.no_grad():
+            image_features = self.model.encode_image(batch['images'])
+            text_features = self.model.encode_text(batch['captions'])
 
-        # normalized features
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            # normalized features
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-        image_centroid = image_features.mean(dim=0)
-        texts_centroid = text_features.mean(dim=0)
+            image_centroid = image_features.mean(dim=0)
+            texts_centroid = text_features.mean(dim=0)
 
-        centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
-        pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
-        self.log('centroid distance', centroid_distance, sync_dist=True)
-        self.log('pairwise distance', pairwise_distance, sync_dist=True)
+            centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
+            pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
+            self.log(f'{dataset}centroid distance', centroid_distance, sync_dist=True, add_dataloader_idx=False)
+            self.log(f'{dataset}pairwise distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False)
 
-        # adapters
-        if hasattr(self, 'vision_adapter'):
-            image_features = self.vision_adapter(image_features)
+            # adapters
+            if hasattr(self, 'vision_adapter'):
+                image_features = self.vision_adapter(image_features)
 
-        if hasattr(self, 'text_adapter'):
-            text_features = self.text_adapter(text_features)
+            if hasattr(self, 'text_adapter'):
+                text_features = self.text_adapter(text_features)
 
-        # cosine similarity as logits
-        logit_scale = self.model.logit_scale.exp()
-        logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
-        logits_per_text = logits_per_image.t()
+            # cosine similarity as logits
+            logit_scale = self.model.logit_scale.exp()
+            logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+            logits_per_text = logits_per_image.t()
 
-        ce = torch.nn.CrossEntropyLoss()
-        ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
-        self.log('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2, sync_dist=True)
+            ce = torch.nn.CrossEntropyLoss()
+            
+            ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
+            self.log(f'{dataset}val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2, add_dataloader_idx=False, sync_dist=True)
 
-        # similarity
-        positive_mean = torch.diagonal(logits_per_image).mean()
-        off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
-        n = logits_per_image.shape[0]
-        negative_mean = off_diagonal.sum() / (n ** 2 - n)
-        self.log('mean_positive_similarity', positive_mean, sync_dist=True)
-        self.log('mean_negative_similarity', negative_mean, sync_dist=True)
+            # similarity
+            positive_mean = torch.diagonal(logits_per_image).mean()
+            off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
+            n = logits_per_image.shape[0]
+            negative_mean = off_diagonal.sum() / (n ** 2 - n)
+            self.log(f'{dataset}mean_positive_similarity', positive_mean, sync_dist=True, add_dataloader_idx=False)
+            self.log(f'{dataset}mean_negative_similarity', negative_mean, sync_dist=True, add_dataloader_idx=False)
 
-        #retrieval
-        targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-        indexes = torch.arange(targets.shape[0])
-        indexes = indexes.repeat(targets.shape[0], 1).T
+            #retrieval
+            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+            indexes = torch.arange(targets.shape[0])
+            indexes = indexes.repeat(targets.shape[0], 1).T
 
-        targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-        indexes = torch.arange(targets.shape[0])
-        indexes = indexes.repeat(targets.shape[0], 1).T
+            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+            indexes = torch.arange(targets.shape[0])
+            indexes = indexes.repeat(targets.shape[0], 1).T
 
-        for k in [1, 5, 10]:
-            rk = RetrievalRecall(top_k=k)
-            self.log(f'i2t r@{k}', rk(logits_per_image, targets, indexes), sync_dist=True)
-            self.log(f't2i r@{k}', rk(logits_per_image.T, targets, indexes), sync_dist=True)
+            for k in [1, 5, 10]:
+                rk = RetrievalRecall(top_k=k)
+                self.log(f'{dataset}i2t r@{k}', rk(logits_per_image, targets, indexes), sync_dist=True, add_dataloader_idx=False)
+                self.log(f'{dataset}t2i r@{k}', rk(logits_per_image.T, targets, indexes), sync_dist=True, add_dataloader_idx=False)
 
     def training_step(self, batch, batch_idx):
         if self.cooling is not None:
@@ -214,3 +248,52 @@ class CLIP(L.LightningModule):
 
         print(f'total params: {total / 1e6:.2f}M,  learnable params: {learnable / 1e6:.2f}M')
         return total, learnable
+
+class LongCLIP(CLIP, L.LightningModule):
+    def __init__(self, conf):
+        L.LightningModule.__init__(self)
+        modelName = conf.model.name.split(':')[1]
+        script_path = os.path.normpath(os.path.join(os.path.abspath(__file__), '../../'))
+        self.model, self.preprocess = longclip.load(f"{script_path}/LongCLIP/checkpoints/{modelName}.pt", device='cpu')
+        self.tokenize = longclip.tokenize
+        
+        # self.automatic_optimization = False
+        if conf.dataset.name == 'geo':
+            self.multi_val = True
+            self.geo_indices_val = conf.dataset.geo_index_val
+
+        self.model.logit_scale = torch.nn.Parameter(
+            torch.log(torch.ones(1) * conf.model.temperature),
+            requires_grad=conf.model.train_temperature
+        )
+        
+        self.train_temperature = conf.model.train_temperature
+        self.cooling = None
+        self.lr = conf.train.learning_rate
+        self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
+        # print(self.model)
+
+        if conf.train.cooling.apply:
+            self.cooling = conf.train.cooling.apply
+            self.target_temperature = conf.train.cooling.final_temp
+            self.cooling_steps = conf.train.cooling.iterations
+            self.step = 0
+
+        if conf.model.lora.apply:
+            if conf.model.lora.lib == 'cliplora':
+                apply_lora(conf.model.lora, self.model)
+                mark_only_lora_as_trainable(self)
+
+            elif conf.model.lora.lib == 'loratorch':
+                self.model = apply_lora_attn_mlp(self.model, conf.model.lora)
+                
+        elif conf.model.residual_adapter.apply:
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+            residual_adapter(self.model, conf)
+
+        if conf.model.calibrate:
+            raise NotImplementedError('calibration not implemented')
+        
+    

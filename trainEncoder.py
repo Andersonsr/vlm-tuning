@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 import argparse
 import os
-from dataset.captionDataset import CaptionDataset
+from dataset.datasets import CaptionDataset
 import torch
 from math import ceil
 from model.lora_utils import save_lora, get_lora_parameters, get_list_lora_layers

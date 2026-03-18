@@ -1,7 +1,7 @@
 from omegaconf import OmegaConf
 import argparse
 import os
-from dataset.captionDataset import CaptionDataset
+from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES
 from model.createModel import createModel
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
@@ -26,11 +26,49 @@ if __name__ == '__main__':
     
     model = createModel(conf)
     model.learnable_parameters()
+    if conf.dataset.name != 'geo':
+        train_dataset = CaptionDataset(
+            conf.dataset.root, 
+            conf.dataset.train_annotation, 
+            conf.dataset.name, 
+            model.prepareImages, 
+            model.tokenize, 
+            random=conf.dataset.random
+            )
+        
+        val_dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
+        print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
+        train_loader = train_dataset.get_loader(conf.train.batch_size, True)
+        val_loader = val_dataset.get_loader(3150, False)
+        # val_loader = val_dataset.get_loader(conf.train.batch_size, False)
 
-    train_dataset = CaptionDataset(conf.dataset.root, conf.dataset.train_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=conf.dataset.random)
-    val_dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
-    print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
-
+    else:
+        # TODO: load data with multiple validation datasets
+        train_dataset = GeoDataset(
+            conf.dataset.root, 
+            conf.dataset.train_annotation, 
+            model.prepareImages, 
+            model.tokenize, 
+            conf.dataset.geo_group,
+            conf.dataset.geo_index,
+            randomImage=True,
+            )
+        train_loader = train_dataset.get_loader(conf.train.batch_size, True)
+        
+        val_loader = []
+        for key in conf.dataset.geo_index_val:
+            dataset = GeoDataset(
+                conf.dataset.root, 
+                conf.dataset.val_annotation, 
+                model.prepareImages, 
+                model.tokenize, 
+                conf.dataset.geo_group,
+                [key],
+                randomImage=False,
+                )
+            loader = dataset.get_loader(3150, False)
+            val_loader.append(loader)
+        
     if conf.train.cooling.iterations <= 1:
         # training lenght ratio 
         training_len = (len(train_dataset) // (conf.train.batch_size * args.gpus)) * conf.train.epochs
@@ -41,19 +79,16 @@ if __name__ == '__main__':
     OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, args.name, 'config.yaml'))
     
     # train
-    train_loader = train_dataset.get_loader(conf.train.batch_size, True)
-    val_loader = val_dataset.get_loader(3150, False)
-    # val_loader = val_dataset.get_loader(conf.train.batch_size, False)
-
+    print('model path ', os.path.join(conf.output_dir, args.name))
 
     wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name)
     checkpoint_callback = ModelCheckpoint(
-        monitor="val_loss",  # Quantity to monitor (e.g., "val_loss", "val_acc")
+        monitor=conf.train.monitor,  # Quantity to monitor (e.g., "val_loss", "val_acc")
         dirpath=os.path.join(conf.output_dir, args.name),  # Directory to save the checkpoints
         filename="checkpoint-{epoch:02d}",  # Checkpoint file name with dynamic metrics
         save_top_k=3,  # Save the top 3 best models
         mode="min",  # "min" for loss, "max" for accuracy
-        save_last=True  # Save the last checkpoint with a "last.ckpt" file name
+        save_last=True,  # Save the last checkpoint with a "last.ckpt" file name
     )
 
     callbacks = [checkpoint_callback]
@@ -69,3 +104,4 @@ if __name__ == '__main__':
         strategy=args.strategy,
     )
     trainer.fit(model, train_loader, val_loader, )
+    

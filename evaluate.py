@@ -1,14 +1,18 @@
-import pickle
+from tqdm import tqdm
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
+from dataset.datasets import CaptionDataset
 from sympy import Si
 from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
 import pandas as pd
 from sklearn.decomposition import TruncatedSVD
-from model.encoders import CLIP
+from model.createModel import createModel
 import lightning as l 
+from omegaconf import OmegaConf
 import argparse
+import pandas as pd
+from model.encoders import CLIP
 
 
 def gap_distance(images, texts):
@@ -160,18 +164,75 @@ def similarity(images, texts):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()    
     parser.add_argument('--checkpoint', type=str,help='checkpoint path')
-
+    parser.add_argument('--conf', type=str, help='configuration file path')
+    parser.add_argument('--split', choices=['train', 'val'], default='val')
     args = parser.parse_args()
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
     checkpoint = args.checkpoint
-    CLIP.load_from_checkpoint(checkpoint)
+    conf = OmegaConf.load(args.conf)
+    # model = createModel(conf)
+    # ckpt = torch.load(checkpoint, map_location=device)
+    model = CLIP(args.checkpoint, conf=conf)
 
-    centroid_distance, pairwise_distance = gap_distance(images, texts)
-    _, mean_positive_similarity, mean_negative_similarity = similarity(images, texts)
-    data = {'positive sim.': [f'{mean_positive_similarity.cpu().item():.3f}'],
-            'negative sim.': [f'{mean_negative_similarity.cpu().item():.3f}'],
-            'centroid dist.': [f'{centroid_distance.detach().cpu().item():.3f}'],
-            'pairwise dist.': [f'{pairwise_distance.detach().cpu().item():.3f}']}
+    if args.split == 'train':
+        dataset = CaptionDataset(conf.dataset.root, conf.dataset.train_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
+        loader = dataset.get_loader(3150, False)
 
-    print(pd.DataFrame(data))
-    SVD(images, texts, 'NWPU adapter ideal temperature')
-    retrieval(images, texts, 'NWPU adapter ideal temperature')
+    elif args.split == 'val':
+        dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
+        loader = dataset.get_loader(3150, False)
+
+    for batch in loader:
+        with torch.no_grad():
+            image_features = model.model.encode_image(batch['images'].to(device))
+            text_features = model.model.encode_text(batch['captions'].to(device))
+
+            # normalized features
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+            image_centroid = image_features.mean(dim=0)
+            texts_centroid = text_features.mean(dim=0)
+
+            centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
+            pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
+            print('centroid distance', centroid_distance)
+            print('pairwise distance', pairwise_distance)
+
+            # cosine similarity as logits
+            logit_scale = model.model.logit_scale.exp()
+            logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+            logits_per_text = logits_per_image.t()
+
+            ce = torch.nn.CrossEntropyLoss()
+            ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
+            print('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2)
+
+            # similarity
+            positive_mean = torch.diagonal(logits_per_image).mean()
+            off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
+            n = logits_per_image.shape[0]
+            negative_mean = off_diagonal.sum() / (n ** 2 - n)
+            print('mean_positive_similarity', positive_mean)
+            print('mean_negative_similarity', negative_mean)
+
+            #retrieval
+            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+            indexes = torch.arange(targets.shape[0])
+            indexes = indexes.repeat(targets.shape[0], 1).T
+
+            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+            indexes = torch.arange(targets.shape[0])
+            indexes = indexes.repeat(targets.shape[0], 1).T
+
+            for k in [1, 5, 10]:
+                rk = RetrievalRecall(top_k=k)
+                print(f'i2t r@{k}', rk(logits_per_image, targets, indexes))
+                print(f't2i r@{k}', rk(logits_per_image.T, targets, indexes))
+
+        break
+
+    print(result)
+    pd.DataFrame.from_dict(result).to_excel('result.xlsx')

@@ -5,14 +5,14 @@ import loratorch as lora
 def apply_lora_attn_mlp(model, conf):
     encoders = []
     if conf.encoder == 'vision':
-        encoders.append(model.model.visual.transformer)
+        encoders.append(model.visual.transformer)
 
     elif conf.encoder == 'text':
-        encoders.append(model.model.transformer)
+        encoders.append(model.transformer)
     
     elif conf.encoder == 'both':
-        encoders.append(model.model.visual.transformer)
-        encoders.append(model.model.transformer)
+        encoders.append(model.visual.transformer)
+        encoders.append(model.transformer)
         
     else:
         raise ValueError("Invalid encoder_type. Choose from 'visual', 'text' or 'both'.")
