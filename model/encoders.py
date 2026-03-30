@@ -21,7 +21,8 @@ class CLIP(L.LightningModule):
         modelName = conf.model.name.split(':')[1]
         self.model, self.preprocess = clip.load(modelName, device='cpu')
         self.tokenize = clip.tokenize
-        # self.automatic_optimization = False
+        self.multi_val = False
+
         if conf.dataset.name == 'geo':
             self.multi_val = True
             self.geo_indices_val = conf.dataset.geo_index_val
@@ -45,6 +46,7 @@ class CLIP(L.LightningModule):
 
         if conf.model.lora.apply:
             if conf.model.lora.lib == 'cliplora':
+                print(conf.model.lora.params)
                 apply_lora(conf.model.lora, self.model)
                 mark_only_lora_as_trainable(self)
 
@@ -59,7 +61,8 @@ class CLIP(L.LightningModule):
 
         if conf.model.calibrate:
             raise NotImplementedError('calibration not implemented')
-        
+        self.save_hyperparameters(conf) 
+
 
     def prepareImages(self, images: list[str],) -> torch.Tensor:
         """
@@ -128,7 +131,6 @@ class CLIP(L.LightningModule):
             loratorch.register_model_param_after_backward(self.model)
 
     def configure_optimizers(self):
-        # params = get_lora_parameters(self)
         params = filter(lambda p: p.requires_grad, self.parameters())
         return Adam(params, lr=self.lr)
 
@@ -140,7 +142,19 @@ class CLIP(L.LightningModule):
         with torch.no_grad():
             image_features = self.model.encode_image(batch['images'])
             text_features = self.model.encode_text(batch['captions'])
+            world_size = self.trainer.world_size
 
+            if world_size > 1:
+                dim = image_features.shape[-1]
+                gathered_image_features = self.all_gather(image_features) 
+                gathered_text_features = self.all_gather(text_features) 
+            
+                gathered_image_features[self.global_rank] = image_features
+                gathered_text_features[self.global_rank] = text_features
+
+                image_features = gathered_image_features.view(-1, dim)
+                text_features = gathered_text_features.view(-1, dim)
+            
             # normalized features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
@@ -256,8 +270,8 @@ class LongCLIP(CLIP, L.LightningModule):
         script_path = os.path.normpath(os.path.join(os.path.abspath(__file__), '../../'))
         self.model, self.preprocess = longclip.load(f"{script_path}/LongCLIP/checkpoints/{modelName}.pt", device='cpu')
         self.tokenize = longclip.tokenize
+        self.multi_val = False
         
-        # self.automatic_optimization = False
         if conf.dataset.name == 'geo':
             self.multi_val = True
             self.geo_indices_val = conf.dataset.geo_index_val
@@ -296,4 +310,4 @@ class LongCLIP(CLIP, L.LightningModule):
         if conf.model.calibrate:
             raise NotImplementedError('calibration not implemented')
         
-    
+        self.save_hyperparameters(conf) 

@@ -2,9 +2,10 @@ from tqdm import tqdm
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
-from dataset.datasets import CaptionDataset
+from dataset.datasets import CaptionDataset, GeoDataset
 from sympy import Si
 from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
+import os
 import pandas as pd
 from sklearn.decomposition import TruncatedSVD
 from model.createModel import createModel
@@ -13,6 +14,7 @@ from omegaconf import OmegaConf
 import argparse
 import pandas as pd
 from model.encoders import CLIP
+from torch.utils.data import DataLoader, ConcatDataset
 
 
 def gap_distance(images, texts):
@@ -163,76 +165,123 @@ def similarity(images, texts):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()    
-    parser.add_argument('--checkpoint', type=str,help='checkpoint path')
-    parser.add_argument('--conf', type=str, help='configuration file path')
-    parser.add_argument('--split', choices=['train', 'val'], default='val')
+    parser.add_argument('--conf', type=str, help='configuration file path', required=True)
+    parser.add_argument('--split', choices=['train', 'val'], required=True)
+    parser.add_argument('--all_texts', action='store_true', default=False)
+    parser.add_argument('--batch', type=int, default=3150)
     args = parser.parse_args()
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
-    checkpoint = args.checkpoint
     conf = OmegaConf.load(args.conf)
-    # model = createModel(conf)
-    # ckpt = torch.load(checkpoint, map_location=device)
-    model = CLIP(args.checkpoint, conf=conf)
+    model = createModel(conf)
+    model = model.to(device)
+    model.eval()
 
-    if args.split == 'train':
-        dataset = CaptionDataset(conf.dataset.root, conf.dataset.train_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
-        loader = dataset.get_loader(3150, False)
+    annotation = conf.dataset.train_annotation if args.split == 'train' else conf.dataset.val_annotation
+        
+    if conf.dataset.name != 'geo':
+        dataset = CaptionDataset(
+            conf.dataset.root, 
+            annotation, 
+            conf.dataset.name, 
+            model.prepareImages, 
+            model.tokenize, 
+            random=False,
+            all_texts=args.all_texts
+            )
 
-    elif args.split == 'val':
-        dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
-        loader = dataset.get_loader(3150, False)
+        loader = dataset.get_loader(args.batch, False)
 
+    else:
+        for idx in conf.dataset.geo_index_val:
+            print(f'Loading geo index {idx}')
+            dataset = GeoDataset(
+                conf.dataset.root, 
+                annotation, 
+                model.prepareImages, 
+                model.tokenize, 
+                conf.dataset.geo_group,
+                idx,
+                randomImage=False,
+                )
+            loader = dataset.get_loader(args.batch, False)
+
+    results = {'t2i': [], 'i2t': [], 'k': []}
+    
     for batch in loader:
         with torch.no_grad():
-            image_features = model.model.encode_image(batch['images'].to(device))
-            text_features = model.model.encode_text(batch['captions'].to(device))
+            dim = batch['captions'].shape[-1]
+            bs = batch['captions'].shape[0]
+            ncaptions = 1
 
+            if len(batch['captions'].shape) > 2:
+                text_features = model.model.encode_text(batch['captions'].view(-1, dim).to(device))
+                ncaptions = batch['captions'].shape[1]
+
+            else:
+                text_features = model.model.encode_text(batch['captions'].to(device))
+                            
+            image_features = model.model.encode_image(batch['images'].to(device))
+            
             # normalized features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-            image_centroid = image_features.mean(dim=0)
-            texts_centroid = text_features.mean(dim=0)
-
-            centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
-            pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
-            print('centroid distance', centroid_distance)
-            print('pairwise distance', pairwise_distance)
-
             # cosine similarity as logits
             logit_scale = model.model.logit_scale.exp()
-            logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+            logits_per_image = logit_scale.to(image_features.device) * (image_features @ text_features.t())
             logits_per_text = logits_per_image.t()
 
-            ce = torch.nn.CrossEntropyLoss()
-            ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
-            print('val_loss', (ce(logits_per_image, ground_truth) + ce(logits_per_text, ground_truth)) / 2)
+            print('Image logits shape', logits_per_image.shape)
 
-            # similarity
-            positive_mean = torch.diagonal(logits_per_image).mean()
-            off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
-            n = logits_per_image.shape[0]
-            negative_mean = off_diagonal.sum() / (n ** 2 - n)
-            print('mean_positive_similarity', positive_mean)
-            print('mean_negative_similarity', negative_mean)
+            if conf.dataset.name == 'geo':
+                # TODO: Targets and index are diferent 
+                raise NotImplementedError()
+            
+            else:
+                # retrieval i2t
+                targets_i = torch.zeros(logits_per_image.shape).to(logits_per_image.device)
+                for i in range(targets_i.shape[0]):
+                    targets_i[i, int(i*ncaptions): int((i+1)*ncaptions)] = 1
+                
+                indexes_i = torch.arange(targets_i.shape[0])
+                indexes_i = indexes_i.repeat(targets_i.shape[1], 1).T
+                
+                # retrieval t21
+                targets_t = torch.zeros(logits_per_text.shape).to(logits_per_image.device)
+                for i in range(targets_t.shape[1]):
+                    targets_t[int(i*ncaptions): int((i+1)*ncaptions), i] = 1
+                
+                indexes_t = torch.arange(targets_t.shape[0])
+                indexes_t = indexes_t.repeat(targets_t.shape[1], 1).T
+                
+            # print('targets I', targets_i.shape)
+            # print(targets_i)
+            
+            # print('indexes I', indexes_i.shape)
+            # print(indexes_i)
 
-            #retrieval
-            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-            indexes = torch.arange(targets.shape[0])
-            indexes = indexes.repeat(targets.shape[0], 1).T
+            # print('logits I', logits_per_image.shape)
 
-            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-            indexes = torch.arange(targets.shape[0])
-            indexes = indexes.repeat(targets.shape[0], 1).T
+            # print('targets T', targets_t.shape)
+            # print(targets_t)
+            
+            # print('indexes T', indexes_t.shape)
+            # print(indexes_t)
 
-            for k in [1, 5, 10]:
+            # print('logits T', logits_per_text.shape)
+
+            for k in [1, 5, 10, 20, 50, 100]:
                 rk = RetrievalRecall(top_k=k)
-                print(f'i2t r@{k}', rk(logits_per_image, targets, indexes))
-                print(f't2i r@{k}', rk(logits_per_image.T, targets, indexes))
-
+                results['i2t'].append(rk(logits_per_image, targets_i, indexes_i).detach().item())
+                results['t2i'].append(rk(logits_per_text, targets_t, indexes_t).detach().item())
+                results['k'].append(k)
+    
         break
 
-    print(result)
-    pd.DataFrame.from_dict(result).to_excel('result.xlsx')
+    print(results)
+    name = 'all_texts_' if args.all_texts else ''
+    name += f'{args.split}_'
+    save_path = os.path.join(os.path.dirname(args.conf), f'{name}retrieval_results.csv')
+    pd.DataFrame.from_dict(results).to_csv(save_path)

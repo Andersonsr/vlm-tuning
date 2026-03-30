@@ -12,8 +12,9 @@ model/configs/*temp.yaml
 runTrain.sh
 eval.sh
 featureExtract.sh
-result.xslx
 tt.py
-Long-CLIP/
+LongCLIP/
 .vscode
 tt.py
+*.png
+*.xlsx

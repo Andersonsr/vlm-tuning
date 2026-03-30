@@ -9,6 +9,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.strategies import FSDPStrategy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from clip.model import ResidualAttentionBlock
+from torch.utils.data import DataLoader, ConcatDataset
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -39,34 +40,43 @@ if __name__ == '__main__':
         val_dataset = CaptionDataset(conf.dataset.root, conf.dataset.val_annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
         print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
         train_loader = train_dataset.get_loader(conf.train.batch_size, True)
-        val_loader = val_dataset.get_loader(3150, False)
-        # val_loader = val_dataset.get_loader(conf.train.batch_size, False)
+        val_loader = val_dataset.get_loader(5000, False)
 
     else:
-        # TODO: load data with multiple validation datasets
-        train_dataset = GeoDataset(
-            conf.dataset.root, 
-            conf.dataset.train_annotation, 
-            model.prepareImages, 
-            model.tokenize, 
-            conf.dataset.geo_group,
-            conf.dataset.geo_index,
-            randomImage=True,
-            )
-        train_loader = train_dataset.get_loader(conf.train.batch_size, True)
+        datasets = []
+        for idx in conf.dataset.geo_index:
+            train_dataset = GeoDataset(
+                conf.dataset.root, 
+                conf.dataset.train_annotation, 
+                model.prepareImages, 
+                model.tokenize, 
+                conf.dataset.geo_group,
+                idx,
+                randomImage=True,
+                )
+            
+            datasets.append(train_dataset)
         
+        if len(datasets) > 1:
+            train_dataset = ConcatDataset(datasets)
+            train_loader  = DataLoader(train_dataset, batch_size=conf.train.batch_size, shuffle=False) 
+
+        elif len(datasets) == 1:
+            train_loader = datasets[0].get_loader(conf.train.batch_size, True)
+            
+
         val_loader = []
-        for key in conf.dataset.geo_index_val:
+        for idx in conf.dataset.geo_index_val:
             dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.val_annotation, 
                 model.prepareImages, 
                 model.tokenize, 
                 conf.dataset.geo_group,
-                [key],
+                idx,
                 randomImage=False,
                 )
-            loader = dataset.get_loader(3150, False)
+            loader = dataset.get_loader(5000, False)
             val_loader.append(loader)
         
     if conf.train.cooling.iterations <= 1:
@@ -75,8 +85,9 @@ if __name__ == '__main__':
         model.cooling_steps = int(conf.train.cooling.iterations * training_len)
         conf.train.cooling.iterations = int(conf.train.cooling.iterations * training_len)
 
-    conf.model.lora.save_path = conf.output_dir
-    OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, args.name, 'config.yaml'))
+    conf.model.load_weights = True
+    conf.output_dir = os.path.join(conf.output_dir, args.name)
+    OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, 'config.yaml'))
     
     # train
     print('model path ', os.path.join(conf.output_dir, args.name))
@@ -84,9 +95,9 @@ if __name__ == '__main__':
     wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name)
     checkpoint_callback = ModelCheckpoint(
         monitor=conf.train.monitor,  # Quantity to monitor (e.g., "val_loss", "val_acc")
-        dirpath=os.path.join(conf.output_dir, args.name),  # Directory to save the checkpoints
+        dirpath=conf.output_dir,  # Directory to save the checkpoints
         filename="checkpoint-{epoch:02d}",  # Checkpoint file name with dynamic metrics
-        save_top_k=3,  # Save the top 3 best models
+        save_top_k=1,  # Save the top k best models
         mode="min",  # "min" for loss, "max" for accuracy
         save_last=True,  # Save the last checkpoint with a "last.ckpt" file name
     )
@@ -103,5 +114,6 @@ if __name__ == '__main__':
         log_every_n_steps=conf.log_interval,
         strategy=args.strategy,
     )
-    trainer.fit(model, train_loader, val_loader, )
     
+    trainer.fit(model, train_loader, val_loader, )
+    trainer.save_checkpoint(os.path.join(conf.output_dir, 'manual_save.ckpt'))

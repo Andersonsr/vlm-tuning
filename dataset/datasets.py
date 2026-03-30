@@ -16,27 +16,21 @@ class GeoDataset(Dataset):
                  annotationFile: str, 
                  preprocess: callable, 
                  tokenizer: callable, 
-                 group: Literal['1', '2', '3', '2+3'], 
-                 geo_idx: list=[0], 
+                 group: list, 
+                 geo_idx: int=1, 
                  randomImage=False):
         
         data = pd.read_csv(os.path.join(rootDir, annotationFile))
         self.images = []
         self.texts = []
-        data = data.dropna(subset=[GEO_INDICES[i] for i in geo_idx])
+        data = data.dropna(subset=[GEO_INDICES[geo_idx]])
+        data = data[data['user_group'].isin(group)]
         
-        if group == '2+3':
-            data = data[data['user_group'].isin([2, 3])]
-        
-        else:
-            data = data[data['user_group'] == int(group)]
-
         groups = data.groupby('slide_id')
         for group, values in groups:
             self.images.append(values['image_id'].to_list())
             text = []
-            for idx in geo_idx:
-                text.append(values[GEO_INDICES[idx]].to_list()[0])  # all texts are equal 
+            text.append(values[GEO_INDICES[geo_idx]].to_list()[0])  # all texts are equal 
             
             self.texts.append(text)
 
@@ -63,7 +57,7 @@ class GeoDataset(Dataset):
 
         
 class CaptionDataset(Dataset):
-    def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer, random=False):
+    def __init__(self, rootDir, annotationFile, dataset, preprocess, tokenizer, random=False, all_texts=False):
         datasets = {
             'coco': os.path.join(rootDir, '{}2017'.format(annotationFile.split('.')[0])),
             'nwpu': os.path.join(rootDir, 'images')
@@ -72,6 +66,7 @@ class CaptionDataset(Dataset):
         self.preprocess = preprocess
         self.tokenizer = tokenizer
         self.random = random
+        self.all_texts = all_texts
         try:
             self.root = datasets[dataset]
 
@@ -90,9 +85,11 @@ class CaptionDataset(Dataset):
             k = 0
         
         name = sample['image_name'].replace('\\', '/')
+        texts = sample['captions'] if self.all_texts else sample['captions'][k]
+        
         return {
             'images': self.preprocess([os.path.join(self.root, name)]).squeeze(0),
-            'captions': self.tokenizer(sample['captions'][k]).squeeze(0),
+            'captions': self.tokenizer(texts).squeeze(0),
         }
 
     def get_loader(self, batchSize, shuffle):

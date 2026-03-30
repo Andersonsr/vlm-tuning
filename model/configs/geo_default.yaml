@@ -1,5 +1,5 @@
 model:
-  name: 'CLIP:ViT-L/14' # LongCLIP:longclip-L 'CLIP:ViT-L/14' 
+  name: LongCLIP:longclip-L # LongCLIP:longclip-L 'CLIP:ViT-L/14' 
   temperature: 100.0
   lora:
     apply: true
@@ -34,7 +34,7 @@ dataset:
   val_annotation: 'v2/val.csv'
   random: True
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
-  geo_index_val: [1, 2, 3]
-  geo_group: '2+3' # '2+3', '1', '2', '3'
+  geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_group: [2, 3] # user groups
 output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
 log_interval: 6

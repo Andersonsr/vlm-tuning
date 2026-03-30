@@ -24,13 +24,23 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     conf = OmegaConf.load(args.model_config)
-    model = createModel(conf.model).to(device)
+    model = createModel(conf).to(device)
+    model.eval()
 
     root = args.dataset_root
     annotations = args.annotations
 
-    dataset = CaptionDataset(root, annotations, args.dataset)
-    loader = dataset.get_loader(args.batch_size)
+    dataset = CaptionDataset(
+        root, 
+        annotations, 
+        args.dataset,
+        model.prepareImages, 
+        model.tokenize, 
+        random=False,
+        all_texts=False,
+        )
+       
+    loader = dataset.get_loader(args.batch_size, False)
 
     images_emb = None
     texts_emb = None
@@ -39,8 +49,8 @@ if __name__ == '__main__':
 
     for batch in tqdm(loader):
         with torch.no_grad():
-            im_embeds = model.encode_image(model.prepareImages(batch['images']).to(device))
-            txt_embeds = model.encode_text(model.tokenize(batch['captions']).to(device))
+            txt_embeds = model.model.encode_text(batch['captions'].to(device))
+            im_embeds = model.model.encode_image(batch['images'].to(device))
 
             if images_emb is None:
                 images_emb = im_embeds.detach().cpu()
@@ -49,9 +59,9 @@ if __name__ == '__main__':
             else:
                 images_emb = torch.concat((images_emb, im_embeds.detach().cpu()), dim=0)
                 texts_emb = torch.concat((texts_emb, txt_embeds.detach().cpu()), dim=0)
+            
             captions += batch['captions']
-            images += [os.path.basename(e) for e in batch['images']]
 
-    data = {'image': images, 'captions': captions, 'image_embeddings': images_emb, 'text_embeddings': texts_emb}
+    data = {'captions': captions, 'image_embeddings': images_emb, 'text_embeddings': texts_emb}
     pickle.dump(data, open(args.save_path, 'wb'))
 
