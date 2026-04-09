@@ -1,25 +1,14 @@
 import sys, os
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__))))
-from encoders import CLIP, LongCLIP
-from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers, apply_lora
-from loratorch_utils import apply_lora_attn_mlp
+from encoders import CLIP
 import torch
-from model.adapter import residual_adapter
 import omegaconf
 
 
 
 def createModel(conf,):
     torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
-    parts = conf.model.name.split(':')
-    if parts[0] == 'CLIP':
-         model = CLIP(conf)
-
-    elif parts[0] == 'LongCLIP':
-        model = LongCLIP(conf)
-        
-    else:
-        raise ValueError(f'Invalid model name {conf.name}')
+    model = CLIP(conf)
 
     if conf.model.load_weights:
         
@@ -30,4 +19,4 @@ def createModel(conf,):
 
     return model
 
-    #NWPU-CLIP-base32-cooling-batch1024
+    # NWPU-CLIP-base32-cooling-batch1024

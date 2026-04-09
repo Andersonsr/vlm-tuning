@@ -1,15 +1,15 @@
 model:
-  name: LongCLIP:longclip-L # LongCLIP:longclip-L 'CLIP:ViT-L/14' 
+  name: CLIP:ViT-L/14  # LongCLIP:longclip-L CLIP:ViT-L/14 'RemoteCLIP:ViT-B-32'
   temperature: 100.0
   lora:
     apply: true
     lib: 'loratorch' # loratorch or cliplora
     r: 4
-    alpha: 16
+    alpha: 8
     dropout_rate: 0.25
     params: ['q', 'k', 'v', 'o']
     encoder: 'both' # both, vision, text
-    position: 'all'
+    position: 'all' # layers to apply lora, check lora utils
   residual_adapter:
     apply: false
     target: 'both' # 'vision', 'text', 'both'
@@ -32,7 +32,7 @@ dataset:
   root: '/nethome/atena_projetos/fibz/data/Dataset/'
   train_annotation: 'v2/train.csv'
   val_annotation: 'v2/val.csv'
-  random: True
+  random: true
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_group: [2, 3] # user groups

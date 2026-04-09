@@ -4,8 +4,6 @@ steam.csv
 plots
 .idea
 idealTemp.py
-model/__pycache__/
-dataset/__pycache__/
 wandb/
 logs/
 model/configs/*temp.yaml
@@ -17,4 +15,10 @@ LongCLIP/
 .vscode
 tt.py
 *.png
+*.sh
 *.xlsx
+*.json
+idealTemperatureTest.py
+runTrainVarious.sh
+__pycache__/
+*.pyc

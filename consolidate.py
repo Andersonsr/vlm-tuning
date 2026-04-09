@@ -40,4 +40,4 @@ if __name__ == '__main__':
 
     print(f"Converted checkpoint saved to {output_path}")
 
-    # python consolidate.py --dir /nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/NWPU-random-CLIP-base32-LoRA-batch1024-original/ --last
+    # python consolidate.py --dir /nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/GEO-CLIP-large14-LoRA-batch512-original-composition/ --last

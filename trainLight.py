@@ -4,12 +4,12 @@ import os
 from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES
 from model.createModel import createModel
 import lightning as L
+from lightning.pytorch import seed_everything
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.strategies import FSDPStrategy
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-from clip.model import ResidualAttentionBlock
 from torch.utils.data import DataLoader, ConcatDataset
+from glob import glob
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -18,13 +18,18 @@ if __name__ == '__main__':
     parser.add_argument('--gpus', type=int, default=1, help='gpus per node')
     parser.add_argument('--accelerator', type=str, default='gpu', choices=['gpu', 'cpu', 'auto'], help='accelerator used to run the job')
     parser.add_argument('--name', type=str, default='test', help='run name')
-    parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'deepspeed_stage_2',]) 
+    parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'deepspeed_stage_2',])
+    parser.add_argument('--temp', type=float, default=None, help='used to override conf model temperature') 
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
+    seed_everything(777, workers=True)
+
     os.makedirs(os.path.join(conf.output_dir, args.name),  exist_ok=True)    
     conf.model.lora.backbone = conf.model.name.split(':')[-1]
-    
+    if args.temp is not None:
+        conf.model.temperature = args.temp
+
     model = createModel(conf)
     model.learnable_parameters()
     if conf.dataset.name != 'geo':
@@ -58,10 +63,12 @@ if __name__ == '__main__':
             datasets.append(train_dataset)
         
         if len(datasets) > 1:
+            print('multi train datasets')
             train_dataset = ConcatDataset(datasets)
-            train_loader  = DataLoader(train_dataset, batch_size=conf.train.batch_size, shuffle=False) 
+            train_loader  = DataLoader(train_dataset, batch_size=conf.train.batch_size, shuffle=True) 
 
         elif len(datasets) == 1:
+            print('single train dataset')
             train_loader = datasets[0].get_loader(conf.train.batch_size, True)
             
 
@@ -76,9 +83,11 @@ if __name__ == '__main__':
                 idx,
                 randomImage=False,
                 )
-            loader = dataset.get_loader(5000, False)
+            
+            loader = dataset.get_loader(1411, False)
             val_loader.append(loader)
-        
+        print(f'number of validation datasets {len(val_loader)}')
+    
     if conf.train.cooling.iterations <= 1:
         # training lenght ratio 
         training_len = (len(train_dataset) // (conf.train.batch_size * args.gpus)) * conf.train.epochs
@@ -90,7 +99,7 @@ if __name__ == '__main__':
     OmegaConf.save(config=conf, f=os.path.join(conf.output_dir, 'config.yaml'))
     
     # train
-    print('model path ', os.path.join(conf.output_dir, args.name))
+    print('model path ', os.path.join(conf.output_dir))
 
     wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name)
     checkpoint_callback = ModelCheckpoint(
@@ -115,5 +124,5 @@ if __name__ == '__main__':
         strategy=args.strategy,
     )
     
-    trainer.fit(model, train_loader, val_loader, )
+    trainer.fit(model, train_loader, val_loader,)
     trainer.save_checkpoint(os.path.join(conf.output_dir, 'manual_save.ckpt'))

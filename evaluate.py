@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from dataset.datasets import CaptionDataset, GeoDataset
 from sympy import Si
+import pickle
 from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
 import os
 import pandas as pd
@@ -168,7 +169,7 @@ if __name__ == '__main__':
     parser.add_argument('--conf', type=str, help='configuration file path', required=True)
     parser.add_argument('--split', choices=['train', 'val'], required=True)
     parser.add_argument('--all_texts', action='store_true', default=False)
-    parser.add_argument('--batch', type=int, default=3150)
+    parser.add_argument('--batch', type=int, default=5000) # composition 1411
     args = parser.parse_args()
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -204,25 +205,32 @@ if __name__ == '__main__':
                 conf.dataset.geo_group,
                 idx,
                 randomImage=False,
+                return_labels=True
                 )
             loader = dataset.get_loader(args.batch, False)
 
     results = {'t2i': [], 'i2t': [], 'k': []}
     
     for batch in loader:
+        print(batch['tokens'].shape)
+        print(batch['image'].shape)
+
         with torch.no_grad():
-            dim = batch['captions'].shape[-1]
-            bs = batch['captions'].shape[0]
+            context_len = batch['tokens'].shape[-1] # context length
+            bs = batch['tokens'].shape[0]
+            print(context_len, bs)
             ncaptions = 1
 
-            if len(batch['captions'].shape) > 2:
-                text_features = model.model.encode_text(batch['captions'].view(-1, dim).to(device))
-                ncaptions = batch['captions'].shape[1]
+            labels = batch['labels']
+
+            if len(batch['tokens'].shape) > 2:
+                text_features = model.model.encode_text(batch['tokens'].view(-1, context_len).to(device))
+                ncaptions = batch['tokens'].shape[1]
 
             else:
-                text_features = model.model.encode_text(batch['captions'].to(device))
+                text_features = model.model.encode_text(batch['tokens'].to(device))
                             
-            image_features = model.model.encode_image(batch['images'].to(device))
+            image_features = model.model.encode_image(batch['image'].to(device))
             
             # normalized features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -236,10 +244,31 @@ if __name__ == '__main__':
             print('Image logits shape', logits_per_image.shape)
 
             if conf.dataset.name == 'geo':
-                # TODO: Targets and index are diferent 
-                raise NotImplementedError()
+                labels = batch['labels']
+                targets = []
+                
+                for label in labels:
+                    equal = []
+                    for other_label in labels:
+                        equal.append(int(label == other_label))
+                    targets.append(equal)
+                
+                targets = torch.Tensor(targets).to(logits_per_image.device)
+                indexes = torch.arange(targets.shape[0]).to(logits_per_image.device)
+                indexes = indexes.repeat(targets.shape[1], 1).T
+                
+                sums = targets.sum(dim=0)
+                average = sums.mean()
+                print('average number of positive values', average)
+                
+                for k in [1, 5, 10, 20, 50, 100]:
+                    rk = RetrievalRecall(top_k=k)
+                    results['i2t'].append(rk(logits_per_image, targets, indexes).detach().item())
+                    results['t2i'].append(rk(logits_per_text, targets, indexes).detach().item())
+                    results['k'].append(k)
             
             else:
+                # image and text shapes can be different NxN*5 
                 # retrieval i2t
                 targets_i = torch.zeros(logits_per_image.shape).to(logits_per_image.device)
                 for i in range(targets_i.shape[0]):
@@ -255,28 +284,12 @@ if __name__ == '__main__':
                 
                 indexes_t = torch.arange(targets_t.shape[0])
                 indexes_t = indexes_t.repeat(targets_t.shape[1], 1).T
-                
-            # print('targets I', targets_i.shape)
-            # print(targets_i)
-            
-            # print('indexes I', indexes_i.shape)
-            # print(indexes_i)
 
-            # print('logits I', logits_per_image.shape)
-
-            # print('targets T', targets_t.shape)
-            # print(targets_t)
-            
-            # print('indexes T', indexes_t.shape)
-            # print(indexes_t)
-
-            # print('logits T', logits_per_text.shape)
-
-            for k in [1, 5, 10, 20, 50, 100]:
-                rk = RetrievalRecall(top_k=k)
-                results['i2t'].append(rk(logits_per_image, targets_i, indexes_i).detach().item())
-                results['t2i'].append(rk(logits_per_text, targets_t, indexes_t).detach().item())
-                results['k'].append(k)
+                for k in [1, 5, 10, 20, 50, 100]:
+                    rk = RetrievalRecall(top_k=k)
+                    results['i2t'].append(rk(logits_per_image, targets_i, indexes_i).detach().item())
+                    results['t2i'].append(rk(logits_per_text, targets_t, indexes_t).detach().item())
+                    results['k'].append(k)
     
         break
 
@@ -285,3 +298,6 @@ if __name__ == '__main__':
     name += f'{args.split}_'
     save_path = os.path.join(os.path.dirname(args.conf), f'{name}retrieval_results.csv')
     pd.DataFrame.from_dict(results).to_csv(save_path)
+    
+    with open(os.path.join(os.path.dirname(args.conf), f'{name}logits.pkl'), 'wb') as file:
+        pickle.dump(logits_per_image.detach().cpu(), file)

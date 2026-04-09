@@ -46,11 +46,13 @@ if __name__ == '__main__':
     texts_emb = None
     captions = []
     images = []
+    images_names = []
+    labels = []
 
     for batch in tqdm(loader):
         with torch.no_grad():
-            txt_embeds = model.model.encode_text(batch['captions'].to(device))
-            im_embeds = model.model.encode_image(batch['images'].to(device))
+            txt_embeds = model.model.encode_text(batch['tokens'].to(device))
+            im_embeds = model.model.encode_image(batch['image'].to(device))
 
             if images_emb is None:
                 images_emb = im_embeds.detach().cpu()
@@ -60,8 +62,11 @@ if __name__ == '__main__':
                 images_emb = torch.concat((images_emb, im_embeds.detach().cpu()), dim=0)
                 texts_emb = torch.concat((texts_emb, txt_embeds.detach().cpu()), dim=0)
             
-            captions += batch['captions']
+            captions += batch['text']
+            images_names += batch['image_name']
+            labels += batch['labels']
 
-    data = {'captions': captions, 'image_embeddings': images_emb, 'text_embeddings': texts_emb}
+    data = {'captions': captions, 'image_embeddings': images_emb, 'text_embeddings': texts_emb, 'image_name': images_names, 'labels': labels}
+    # print(data)
     pickle.dump(data, open(args.save_path, 'wb'))
 

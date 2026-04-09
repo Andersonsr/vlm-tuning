@@ -12,15 +12,57 @@ from LongCLIP.model import longclip
 from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers, apply_lora
 from loratorch_utils import apply_lora_attn_mlp
 from dataset.datasets import GEO_INDICES
+from model.GeoRSCLIPpreprocess import get_preprocess
+import torch, open_clip
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def get_model(conf):
+    split = conf.model.name.split(':')
+    modelFam = split[0]
+    modelName = split[1]
+
+    if modelFam == 'CLIP':
+        model, preprocess = clip.load(modelName, device='cpu')
+        tokenize = clip.tokenize
+    
+    elif modelFam == 'LongCLIP':
+        model, preprocess = longclip.load(f"/nethome/recpinfo/users/fibz/.cache/long-clip/{modelName}.pt", device='cpu')
+        tokenize = longclip.tokenize
+    
+    elif modelFam == 'RemoteCLIP':      
+        model, _, preprocess = open_clip.create_model_and_transforms(modelName)
+        tokenize = open_clip.get_tokenizer(modelName)
+        ckpt = torch.load(f"/nethome/recpinfo/users/fibz/.cache/remote-clip/RemoteCLIP-{modelName}.pt", map_location="cpu")
+        model.load_state_dict(ckpt)
+    
+    elif modelFam == 'GeoRSCLIP':
+        model, _, _ = open_clip.create_model_and_transforms(modelName, pretrained="openai")
+        tokenize = open_clip.get_tokenizer(modelName)
+        
+        checkpoint = torch.load(f"/nethome/recpinfo/users/fibz/.cache/geors-clip/{modelName}.pt", map_location="cpu")
+        msg = model.load_state_dict(checkpoint, strict=False)
+        model = model.to("cpu")
+        preprocess = get_preprocess(
+                image_resolution=224,
+        )
+        
+    elif modelFam == 'OpenCLIP':
+        raise NotImplementedError()
+    
+    else:
+        raise ValueError('{} not recognized'.format(modelFam))
+
+    return model, preprocess, tokenize
+
 
 
 class CLIP(L.LightningModule):
     def __init__(self, conf):
         super(CLIP, self).__init__()
-        modelName = conf.model.name.split(':')[1]
-        self.model, self.preprocess = clip.load(modelName, device='cpu')
-        self.tokenize = clip.tokenize
+        self.model, self.preprocess, self.tokenize = get_model(conf)
+
         self.multi_val = False
 
         if conf.dataset.name == 'geo':
@@ -59,8 +101,6 @@ class CLIP(L.LightningModule):
 
             residual_adapter(self.model, conf)
 
-        if conf.model.calibrate:
-            raise NotImplementedError('calibration not implemented')
         self.save_hyperparameters(conf) 
 
 
@@ -110,6 +150,7 @@ class CLIP(L.LightningModule):
         self.step += 1
 
     def forward(self, batch,):
+        # isso nao é usado nunca mas ACHO que tem que é obrigado a dar override nessa funcao
         image_features = self.encode_image(batch['image'])
         text_features = self.encode_text(batch['text'])
         return image_features, text_features
@@ -140,18 +181,15 @@ class CLIP(L.LightningModule):
             dataset = '{}_'.format(GEO_INDICES[self.geo_indices_val[dataloader_idx]])
         
         with torch.no_grad():
-            image_features = self.model.encode_image(batch['images'])
-            text_features = self.model.encode_text(batch['captions'])
+            image_features = self.model.encode_image(batch['image'])
+            text_features = self.model.encode_text(batch['tokens'])
             world_size = self.trainer.world_size
 
             if world_size > 1:
                 dim = image_features.shape[-1]
                 gathered_image_features = self.all_gather(image_features) 
                 gathered_text_features = self.all_gather(text_features) 
-            
-                gathered_image_features[self.global_rank] = image_features
-                gathered_text_features[self.global_rank] = text_features
-
+    
                 image_features = gathered_image_features.view(-1, dim)
                 text_features = gathered_text_features.view(-1, dim)
             
@@ -210,19 +248,17 @@ class CLIP(L.LightningModule):
         if self.cooling is not None:
             self.update_temperature()
 
-        image_features = self.encode_image(batch['images'])
-        text_features = self.encode_text(batch['captions'])
+        image_features = self.encode_image(batch['image'])
+        text_features = self.encode_text(batch['tokens'])
         world_size = self.trainer.world_size
 
-        # TODO: check how global and local loss works
-        # local loss + gather_with_grad = global_loss + gather
         if world_size > 1:
             dim = image_features.shape[-1]
-            gathered_image_features = self.all_gather(image_features) #, sync_grads=True)
-            gathered_text_features = self.all_gather(text_features) #, sync_grads=True)
+            gathered_image_features = self.all_gather(image_features , sync_grads=True)
+            gathered_text_features = self.all_gather(text_features , sync_grads=True)
         
-            gathered_image_features[self.global_rank] = image_features
-            gathered_text_features[self.global_rank] = text_features
+            # gathered_image_features[self.global_rank] = image_features
+            # gathered_text_features[self.global_rank] = text_features
 
             image_features = gathered_image_features.view(-1, dim)
             text_features = gathered_text_features.view(-1, dim)
@@ -263,51 +299,3 @@ class CLIP(L.LightningModule):
         print(f'total params: {total / 1e6:.2f}M,  learnable params: {learnable / 1e6:.2f}M')
         return total, learnable
 
-class LongCLIP(CLIP, L.LightningModule):
-    def __init__(self, conf):
-        L.LightningModule.__init__(self)
-        modelName = conf.model.name.split(':')[1]
-        script_path = os.path.normpath(os.path.join(os.path.abspath(__file__), '../../'))
-        self.model, self.preprocess = longclip.load(f"{script_path}/LongCLIP/checkpoints/{modelName}.pt", device='cpu')
-        self.tokenize = longclip.tokenize
-        self.multi_val = False
-        
-        if conf.dataset.name == 'geo':
-            self.multi_val = True
-            self.geo_indices_val = conf.dataset.geo_index_val
-
-        self.model.logit_scale = torch.nn.Parameter(
-            torch.log(torch.ones(1) * conf.model.temperature),
-            requires_grad=conf.model.train_temperature
-        )
-        
-        self.train_temperature = conf.model.train_temperature
-        self.cooling = None
-        self.lr = conf.train.learning_rate
-        self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
-        # print(self.model)
-
-        if conf.train.cooling.apply:
-            self.cooling = conf.train.cooling.apply
-            self.target_temperature = conf.train.cooling.final_temp
-            self.cooling_steps = conf.train.cooling.iterations
-            self.step = 0
-
-        if conf.model.lora.apply:
-            if conf.model.lora.lib == 'cliplora':
-                apply_lora(conf.model.lora, self.model)
-                mark_only_lora_as_trainable(self)
-
-            elif conf.model.lora.lib == 'loratorch':
-                self.model = apply_lora_attn_mlp(self.model, conf.model.lora)
-                
-        elif conf.model.residual_adapter.apply:
-            for param in self.model.parameters():
-                param.requires_grad = False
-
-            residual_adapter(self.model, conf)
-
-        if conf.model.calibrate:
-            raise NotImplementedError('calibration not implemented')
-        
-        self.save_hyperparameters(conf) 
