@@ -20,7 +20,7 @@ if __name__ == '__main__':
 
     if args.best:
         checkpoints = glob.glob(os.path.join(input_dir, 'checkpoint-epoch=*.ckpt'))
-        best = '0'
+        best = '00'
         for checkpoint in checkpoints:
             match = re.search(r"checkpoint-epoch=(\d+)", checkpoint)
             if match:
@@ -33,9 +33,12 @@ if __name__ == '__main__':
     elif args.manual:
         input_dir = os.path.join(input_dir, 'manual_save.ckpt')
         
-    else:
+    elif args.last:
         input_dir = os.path.join(input_dir, 'last.ckpt')
     
+    else:
+        raise ValueError("Please specify one of --last, --manual, or --best to select the checkpoint to convert.")
+
     convert_zero_checkpoint_to_fp32_state_dict(input_dir, output_path, exclude_frozen_parameters=False,)
 
     print(f"Converted checkpoint saved to {output_path}")

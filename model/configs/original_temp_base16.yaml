@@ -1,0 +1,45 @@
+model:
+  name: 'CLIP:ViT-B/16' #'DINOtxt:ViT-L/16' 'GeoRSCLIP:ViT-B-32' #'RemoteCLIP:ViT-B-32'    
+  temperature: 5.0 
+  image_size: 224 # only for models with variable image size
+  lora:
+    apply: true
+    lib: 'loratorch' #'peft' #  or cliplora
+    r: 4
+    alpha: 8
+    dropout_rate: 0.25
+    params: ['q', 'k', 'v', 'o']
+    encoder: 'both' # both, vision, text
+    position: 'all'
+  residual_adapter:
+    apply: false
+    target: 'both' # 'vision', 'text', 'both'
+    alpha: 0.5
+    bottleneck_reduction: 4
+  calibrate: false
+  load_weights: false # false or path to file
+  train_temperature: false
+train:
+  batch_size: 128
+  epochs: 30
+  local_loss: false
+  monitor: val_loss
+  learning_rate: 0.0005
+  cooling:
+    apply: false # 'step', 'linear' or false
+    final_temp: 59.32769 
+    iterations: 1 # cooling duration, total batches ratio
+dataset:
+  name: 'nwpu'
+  root: '/nethome/recpinfo/users/fibz/data/dataset/nwpu/'
+  train_annotation: 'train.json'
+  val_annotation: 'val.json'
+  random: false
+# dataset:
+#     name: 'rsicd'
+#     root: '/nethome/recpinfo/users/fibz/data/dataset/RSICD/'
+#     val_annotation: 'val.json'
+#     train_annotation: 'train.json'
+#     random: false
+output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+log_interval: 100

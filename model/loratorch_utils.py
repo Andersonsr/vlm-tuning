@@ -16,7 +16,7 @@ def apply_lora_attn_mlp(model, conf):
         
     else:
         raise ValueError("Invalid encoder_type. Choose from 'visual', 'text' or 'both'.")
-
+    # print(model)
     enable_lora=conf.params # ['q', 'k', 'v', 'o']
     for encoder in encoders:
         for i, resblock in enumerate(encoder.resblocks):

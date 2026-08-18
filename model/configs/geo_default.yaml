@@ -1,11 +1,13 @@
 model:
-  name: CLIP:ViT-L/14  # LongCLIP:longclip-L CLIP:ViT-L/14 'RemoteCLIP:ViT-B-32'
+  name: DINOtxt:ViT-L/16  # LongCLIP:longclip-L CLIP:ViT-L/14 'RemoteCLIP:ViT-B-32'
   temperature: 100.0
+  image_size: 224
+  vision_head_only: false
   lora:
-    apply: true
-    lib: 'loratorch' # loratorch or cliplora
-    r: 4
-    alpha: 8
+    apply: True
+    lib: 'peft' # loratorch, cliplora, peft
+    r: 12
+    alpha: 24
     dropout_rate: 0.25
     params: ['q', 'k', 'v', 'o']
     encoder: 'both' # both, vision, text
@@ -19,22 +21,25 @@ model:
   load_weights: false # false or path to file
   train_temperature: false
 train:
-  batch_size: 128 # * n_gpus
+  batch_size: 192 # * n_gpus
   epochs: 25
+  local_loss: true 
   learning_rate: 0.0005
-  monitor: 'composition_val_loss'
+  monitor: 'classification_i2t r@10' #'composition_val_loss' 'classification_t2i r@10'
+  multi_positive: false
   cooling:
     apply: false # 'step', 'linear' or false
     final_temp: 59.32769 
     iterations: 0.9 # cooling duration, total batches ratio
 dataset:
   name: 'geo' # 'nwpu', 'coco', 'geo'
-  root: '/nethome/atena_projetos/fibz/data/Dataset/'
-  train_annotation: 'v2/train.csv'
-  val_annotation: 'v2/val.csv'
+  root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'
+  train_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/train.csv'
+  val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
   random: true
-  geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
-  geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
-  geo_group: [2, 3] # user groups
+  geo_index: [0] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_index_val: [0] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_group: [2, 3] # user groups 
+  resolutions: [256, 512] # image resolution for each magnifications
 output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
 log_interval: 6

@@ -9,13 +9,13 @@ import omegaconf
 def createModel(conf,):
     torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
     model = CLIP(conf)
-
+    # print("CONF", conf)
+    
     if conf.model.load_weights:
-        
         path = os.path.join(conf.output_dir, 'pytorch_model', 'pytorch_model.bin') #'last.ckpt') 
+        print('LOADING MODEL AT', path)
         ckp = torch.load(path, weights_only=False)
         model.load_state_dict(ckp, strict=False)
-        print('LOADING MODEL AT', path)
 
     return model
 

@@ -19,10 +19,10 @@ class ResidualProjection(nn.Module):
 
 
 def residual_adapter(model, conf):
-    dim = model.model.token_embedding.weight.size()[1]
-    if conf.residual_adapter.target in ['both', 'vision']:
-        model.vision_adapter = ResidualProjection(dim, conf.residual_adapter.bottleneck_reduction, conf.residual_adapter.alpha)
+    dim = model.dim
+    if conf.model.residual_adapter.target in ['both', 'vision']:
+        model.vision_adapter = ResidualProjection(dim, conf.model.residual_adapter.bottleneck_reduction, conf.model.residual_adapter.alpha)
 
-    if conf.residual_adapter.target in ['both', 'text']:
-        model.text_adapter = ResidualProjection(dim, conf.residual_adapter.bottleneck_reduction, conf.residual_adapter.alpha)
+    if conf.model.residual_adapter.target in ['both', 'text']:
+        model.text_adapter = ResidualProjection(dim, conf.model.residual_adapter.bottleneck_reduction, conf.model.residual_adapter.alpha)
 
