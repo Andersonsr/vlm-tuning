@@ -9,15 +9,11 @@ from torchmetrics.retrieval import RetrievalPrecision, RetrievalRecall
 import os
 from model.encoders import resize_transform, crop_transform
 import pandas as pd
-from sklearn.decomposition import TruncatedSVD
 from model.createModel import createModel
 import lightning as l 
 from omegaconf import OmegaConf
 import argparse
 import pandas as pd
-from model.encoders import CLIP
-from torch.utils.data import DataLoader, ConcatDataset, Subset
-
 
 def normalizeObj(obj):
     return tuple(
@@ -144,7 +140,7 @@ if __name__ == '__main__':
            
             loader = dataset.get_loader(args.batch, False)
 
-    results = {'t2i': [], 'i2t': [], 'k': []}
+    results = {'i2t R@k': [], 't2i R@k': [], 'i2t P@k': [], 't2i P@k': [], 'k': []}
     
     for batch in loader:
         print(batch['tokens'].shape)
@@ -155,7 +151,7 @@ if __name__ == '__main__':
             bs = batch['tokens'].shape[0]
             # print(context_len, bs)
             ncaptions = 1
-
+            
             if len(batch['tokens'].shape) > 2:
                 text_features = model.model.encode_text(batch['tokens'].view(-1, context_len).to(device))
                 ncaptions = batch['tokens'].shape[1]
@@ -163,7 +159,7 @@ if __name__ == '__main__':
             else:
                 text_features = model.model.encode_text(batch['tokens'].to(device))
                             
-            image_features = model.model.encode_image(batch['image'].to(device))
+            image_features = model.model.encode_image(batch['image'].to(device))    
             
             # normalized features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
@@ -172,34 +168,36 @@ if __name__ == '__main__':
             # cosine similarity as logits
             logit_scale = model.model.logit_scale.exp()
             logits_per_image = logit_scale.to(image_features.device) * (image_features @ text_features.t())
+
             logits_per_text = logits_per_image.t()
 
             # print('Image logits shape', logits_per_image.shape)
 
             if conf.dataset.name == 'geo':
                 labels = batch['class']
-                targets = []
-                
-                for label in labels:
-                    equal = []
-                    for other_label in labels:
-                        equal.append(int(label == other_label))
+                targets = (
+                    labels[:, None] == labels[None, :]
+                ).float().to(logits_per_image.device)
+                                
+                n, m = logits_per_image.shape
+                indexes = torch.repeat_interleave(
+                    torch.arange(n), 
+                    repeats=m
+                ).to(logits_per_image.device)
 
-                    targets.append(equal)
+                logits_per_image = logits_per_image.flatten()
+                logits_per_text = logits_per_text.flatten()
+                targets = targets.flatten()
 
-                # torch.eye()
-                targets = torch.Tensor(targets).to(logits_per_image.device)
-                indexes = torch.arange(targets.shape[0]).to(logits_per_image.device)
-                indexes = indexes.repeat(targets.shape[1], 1).T
-                
-                sums = targets.sum(dim=0)
-                average = sums.mean()
-                print('average number of positive values', average)
-                
+                print('average positives per query',targets.sum()/n) 
+
                 for k in [1, 5, 10, 20, 50, 100]:
                     rk = RetrievalRecall(top_k=k)
-                    results['i2t'].append(rk(logits_per_image, targets, indexes).detach().item())
-                    results['t2i'].append(rk(logits_per_text, targets, indexes).detach().item())
+                    pk = RetrievalPrecision(top_k=k)
+                    results['i2t R@k'].append(rk(logits_per_image, targets, indexes).detach().item())
+                    results['t2i R@k'].append(rk(logits_per_text, targets, indexes).detach().item())
+                    results['i2t P@k'].append(pk(logits_per_image, targets, indexes).detach().item())
+                    results['t2i P@k'].append(pk(logits_per_text, targets, indexes).detach().item())              
                     results['k'].append(k)
             
             else:
@@ -222,17 +220,21 @@ if __name__ == '__main__':
 
                 for k in [1, 5, 10, 20, 50, 100]:
                     rk = RetrievalRecall(top_k=k)
-                    results['i2t'].append(rk(logits_per_image, targets_i, indexes_i).detach().item())
-                    results['t2i'].append(rk(logits_per_text, targets_t, indexes_t).detach().item())
-                    results['k'].append(k)
-    
+                    pk = RetrievalPrecision(top_k=k)
+                    results['i2t R@k'].append(rk(logits_per_image, targets_i, indexes_i).detach().item())
+                    results['t2i R@k'].append(rk(logits_per_text, targets_t, indexes_t).detach().item())
+                    results['i2t P@k'].append(pk(logits_per_image, targets_i, indexes_i).detach().item())
+                    results['t2i P@k'].append(pk(logits_per_text, targets_t, indexes_t).detach().item())
+                    results['k'].append(k)  
+            
+            
         break
 
     name = 'all_texts_' if args.all_texts else ''
     name += f'{args.split}_'
+    print(results)
     save_path = os.path.join(os.path.dirname(args.conf), f'{name}retrieval_results.csv')
     pd.DataFrame.from_dict(results).to_csv(save_path)
-    print(results)
     print(f'saving to: {save_path}')
 
     with open(os.path.join(os.path.dirname(args.conf), f'{name}logits.pkl'), 'wb') as file:

@@ -189,21 +189,33 @@ class GeoDataset(Dataset):
             data = data[data['size'] < size]
 
         groups = data.groupby('slide_id')
+
         for group, values in groups:
             self.images.append(values['image_id'].to_list())
             self.texts.append(values[GEO_INDICES[geo_idx]].to_list()[0])
+            if self.return_labels:
+                self.labels.append(values['labels'].to_list()[0])
 
-        if return_labels:
-            labels = []
-            for e in data['labels'].to_list():
+        if self.return_labels:
+            obj_labels = []
+            for e in self.labels:
                 e = e.replace('"', "cramunhao").replace("'", '"').replace("cramunhao", "'")
-                labels.append(json.loads(e))
+                e = json.loads(e)
 
-            data['labels'] = labels
+                filtered_labels = {}
+                for key, value in e.items():
+                    if key in LABEL_MAP[geo_idx]:
+                        filtered_labels[key] = value 
+
+                if not filtered_labels:
+                    filtered_labels['no info'] = True
+
+                obj_labels.append(filtered_labels)
+
+            data = pd.DataFrame({'labels': obj_labels})
             data['labels'] = data['labels'].map(normalizeObj)
             self.labels = data['labels'].to_list()
-
-            _, self.categories  =  pd.factorize(data['labels'] )
+            _, self.categories  =  pd.factorize(data['labels'], sort=True)
 
         self.preprocess = preprocess
         self.tokenizer = tokenizer

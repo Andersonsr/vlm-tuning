@@ -39,6 +39,8 @@ if __name__ == '__main__':
     else:
         raise ValueError("Please specify one of --last, --manual, or --best to select the checkpoint to convert.")
 
+    print('loading model from', input_dir)
+
     convert_zero_checkpoint_to_fp32_state_dict(input_dir, output_path, exclude_frozen_parameters=False,)
 
     print(f"Converted checkpoint saved to {output_path}")

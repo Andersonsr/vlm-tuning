@@ -85,6 +85,8 @@ def get_model(conf):
         repo = 'facebookresearch/dinov3'
         model, tokenizer = torch.hub.load(repo, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source='github', weights=weights)
         model = DINOwrap(model)
+        model.dim = 2048 if conf.model.average_local else 1024
+        model.averaga_local = conf.model.average_local
         tokenize = tokenizer.tokenize
         preprocess =  lambda x: resize_transform(x, conf.model.image_size, 16)
 
@@ -106,16 +108,24 @@ class DINOwrap(torch.nn.Module):
         self.transformer = model.text_model
         self.visual = ExtraWrap(model.visual_model)
         self.original_encode_text = model.encode_text
-        self.dim = 1024
+        self.original_encode_image = model.encode_image
+        self.dim = 0
+        self.averaga_local = None
+        
 
     def encode_image(self, image):
-        cls_tokens, _, patch_tokens = self.visual.transformer.get_class_and_patch_tokens(image)
-        return cls_tokens
+        # cls_tokens, _, patch_tokens = self.visual.transformer.get_class_and_patch_tokens(image)
+        x = self.original_encode_image(image)
+        if not self.averaga_local:
+            x = x[:, :1024]
+
+        return x
     
     def encode_text(self, text):
         x = self.original_encode_text(text)
-        # print(x.shape)
-        x = x[:, :x.shape[1] // 2 ]
+        if not self.averaga_local:
+            x = x[:, :1024]
+            
         return x
         
 class CLIP(L.LightningModule):
@@ -126,9 +136,7 @@ class CLIP(L.LightningModule):
         self.multi_val = False
         self.multi_positive = conf.train.multi_positive if hasattr(conf.train, 'multi_positive') else False
         self.loss_fn = torch.nn.CrossEntropyLoss()
-        if conf.model.name.split(':')[0] == 'DINOtxt':
-            self.dim = 1024
-        else:
+        if conf.model.name.split(':')[0] != 'DINOtxt':
             self.dim = 512 if conf.model.name.split(':')[1] == 'ViT-B/32' else 768
 
         if conf.dataset.name == 'geo':
@@ -153,12 +161,12 @@ class CLIP(L.LightningModule):
 
         if hasattr(conf.model, 'vision_head_only') and conf.model.vision_head_only is True :
             # only works with dinotxt 
-            for name, param in self.model.named_parameters():
-                if 'VisionHead' not in name:
+            for name, param in self.model.visual.named_parameters():
+                if 'transformer.head.' not in name:
                     param.requires_grad = False
                 else:
                     param.requires_grad = True
-                    print('requires grad', name)
+                    # print('requires grad', name)
                     
             if conf.model.lora.apply:
                 # lora will be applied only to the text tower  
@@ -171,7 +179,7 @@ class CLIP(L.LightningModule):
                 )
 
                 self.model.transformer = get_peft_model(self.model.transformer, config)                
-        
+
 
         elif conf.model.lora.apply:
             if conf.model.lora.lib == 'cliplora':
@@ -303,15 +311,6 @@ class CLIP(L.LightningModule):
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             
-            # world_size = self.trainer.world_size
-            # if world_size > 1:
-            #     dim = image_features.shape[-1]
-            #     gathered_image_features = self.all_gather(image_features) 
-            #     gathered_text_features = self.all_gather(text_features) 
-    
-            #     image_features = gathered_image_features.view(-1, dim)
-            #     text_features = gathered_text_features.view(-1, dim)
-            
             bs = text_features.shape[0]
             image_centroid = image_features.mean(dim=0)
             texts_centroid = text_features.mean(dim=0)
@@ -321,30 +320,60 @@ class CLIP(L.LightningModule):
             self.log(f'{dataset}centroid distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
             self.log(f'{dataset}pairwise distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
 
-            # cosine similarity as logits
             logit_scale = self.model.logit_scale.exp()
             logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
             logits_per_text = logits_per_image.t()
-            
-            ground_truth = torch.arange(logits_per_image.shape[0], dtype=torch.long, device=logits_per_image.device)
-            self.log(f'{dataset}val_loss', (self.loss_fn(logits_per_image, ground_truth) + self.loss_fn(logits_per_text, ground_truth)) / 2, add_dataloader_idx=False, sync_dist=True, batch_size=bs)
 
-            # similarity
-            positive_mean = torch.diagonal(logits_per_image).mean()
-            off_diagonal = logits_per_image * (1 - torch.eye(logits_per_image.shape[0]).to(logits_per_image.device))
-            n = logits_per_image.shape[0]
-            negative_mean = off_diagonal.sum() / (n ** 2 - n)
-            self.log(f'{dataset}mean_positive_similarity', positive_mean, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
-            self.log(f'{dataset}mean_negative_similarity', negative_mean, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+            # cosine similarity as logits
+            if not self.multi_positive:
+                labels = torch.arange(
+                    image_features.shape[0],
+                    device=image_features.device,
+                    dtype=torch.long,
+                )
 
+                loss = (self.loss_fn(logits_per_image, labels) + self.loss_fn(logits_per_text, labels)) / 2
+                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )  
+
+            else:
+                labels = batch['class']
+                loss_i2t = self.multi_positive_loss(
+                    logits_per_image,
+                    labels,
+                    labels
+                )
+
+                loss_t2i = self.multi_positive_loss(
+                    logits_per_text,
+                    labels,
+                    labels
+                )
+
+                # Symmetric image-text loss
+                loss = (loss_i2t + loss_t2i) / 2
+                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )  
+
+           
             #retrieval
-            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-            indexes = torch.arange(targets.shape[0])
-            indexes = indexes.repeat(targets.shape[0], 1).T
+            if not self.multi_positive:
+                targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
+            
+            else:
+                labels = batch['class']
+                targets = (
+                    labels[:, None] == labels[None, :]
+                ).float().to(logits_per_image.device)
+                                
 
-            targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
-            indexes = torch.arange(targets.shape[0])
-            indexes = indexes.repeat(targets.shape[0], 1).T
+            n, m = logits_per_image.shape
+            indexes = torch.repeat_interleave(
+                torch.arange(n), 
+                repeats=m
+            ).to(logits_per_image.device)
+
+            logits_per_image = logits_per_image.flatten()
+            logits_per_text = logits_per_text.flatten()
+            targets = targets.flatten()
 
             for k in [1, 5, 10]:
                 rk = RetrievalRecall(top_k=k)
@@ -366,6 +395,7 @@ class CLIP(L.LightningModule):
         positive_mask = (
             query_labels[:, None] == key_labels[None, :]
         ).float()
+        
 
         target = positive_mask / positive_mask.sum(
             dim=1, keepdim=True
@@ -432,7 +462,8 @@ class CLIP(L.LightningModule):
             # single GPU case, no need to gather features
             all_image_features = image_features
             all_text_features = text_features
-            all_class_labels = class_labels
+            if self.multi_positive:
+                all_class_labels = class_labels
 
 
         if self.local_loss:

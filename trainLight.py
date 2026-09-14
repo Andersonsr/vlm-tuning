@@ -1,6 +1,7 @@
 from omegaconf import OmegaConf
 import argparse
 import os
+from collections import defaultdict
 from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES, DistributedSingleDatasetBatchSampler
 from model.encoders import resize_transform, crop_transform
 import lightning as L
@@ -23,9 +24,12 @@ if __name__ == '__main__':
     parser.add_argument('--lora_rank', type=int, default=None)
     parser.add_argument('--lora_alpha', type=int, default=None)
     parser.add_argument('--multipositive', action='store_true', default=None)
+    parser.add_argument('--lr', default=None, type=float)
     parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'deepspeed_stage_2',])
     parser.add_argument('--temp', type=float, default=None, help='used to overwrite config temperature')
     parser.add_argument('--batch_size', type=int, default=None, help='use to overwrite config batch size')
+    parser.add_argument('--vision_head', default=False, action='store_true')
+    parser.add_argument('--average_local', default=False, action='store_true', help='use to average to use average of patch embedings with the cls embedding')
     parser.add_argument('--multiresolution', action='store_true', default=False, help='use to enable multiresolution training')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
@@ -34,6 +38,7 @@ if __name__ == '__main__':
 
     os.makedirs(os.path.join(conf.output_dir, args.name),  exist_ok=True)    
     conf.model.lora.backbone = conf.model.name.split(':')[-1]
+    conf.model.average_local= args.average_local
     if args.multipositive is not None:
         conf.train.multi_positive = args.multipositive    
 
@@ -48,11 +53,29 @@ if __name__ == '__main__':
 
     if args.lora_alpha is not None:
         conf.model.lora.alpha = args.lora_alpha
+
+    if args.lr is not None:
+        conf.train.learning_rate = args.lr
+
+    
+    conf.model.vision_head_only = args.vision_head
+    conf.train.gpus = args.gpus
         
     global_bs = conf.train.batch_size if "WORLD_SIZE" not in os.environ.keys() else int(os.environ["WORLD_SIZE"]) * conf.train.batch_size 
     
     model = createModel(conf)
     model.learnable_parameters()
+
+    groups = defaultdict(int)
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            # adjust this depending on your module hierarchy
+            key = ".".join(name.replace('visual.transformer', 'visual').split(".")[:3])
+            groups[key] += param.numel()
+
+    for name, n in sorted(groups.items(), key=lambda x: -x[1]):
+        print(f"{n/1e6:8.3f}M  {name}")
 
     if conf.dataset.name != 'geo':
         train_dataset = CaptionDataset(
@@ -76,7 +99,7 @@ if __name__ == '__main__':
             train_dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.train_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16), #2nd dim is the largest dim
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16), # 2nd dim is the largest dim
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,

@@ -3,8 +3,9 @@ model:
   temperature: 100.0
   image_size: 224
   vision_head_only: false
+  average_local: false
   lora:
-    apply: True
+    apply: true
     lib: 'peft' # loratorch, cliplora, peft
     r: 12
     alpha: 24
@@ -22,10 +23,11 @@ model:
   train_temperature: false
 train:
   batch_size: 192 # * n_gpus
+  gpus: 1
   epochs: 25
-  local_loss: true 
+  local_loss: false 
   learning_rate: 0.0005
-  monitor: 'classification_i2t r@10' #'composition_val_loss' 'classification_t2i r@10'
+  monitor: 'val_loss' #'composition_val_loss' 'classification_t2i r@10'
   multi_positive: false
   cooling:
     apply: false # 'step', 'linear' or false
@@ -36,9 +38,10 @@ dataset:
   root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'
   train_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/train.csv'
   val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
+  test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv' 
   random: true
-  geo_index: [0] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
-  geo_index_val: [0] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_group: [2, 3] # user groups 
   resolutions: [256, 512] # image resolution for each magnifications
 output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'

@@ -21,7 +21,7 @@ model:
   train_temperature: false
 train:
   batch_size: 128
-  epochs: 30
+  epochs: 25
   local_loss: false
   monitor: val_loss
   learning_rate: 0.0005
@@ -32,8 +32,8 @@ train:
 dataset:
   name: 'nwpu'
   root: '/nethome/recpinfo/users/fibz/data/dataset/nwpu/'
-  train_annotation: 'train.json'
-  val_annotation: 'val.json'
+  train_annotation: 'train_3.json'
+  val_annotation: 'val_3.json'
   random: false
 # dataset:
 #     name: 'rsicd'
