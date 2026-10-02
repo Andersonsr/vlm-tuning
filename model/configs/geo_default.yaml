@@ -40,6 +40,7 @@ dataset:
   val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
   test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv' 
   random: true
+  crop_random_shift: 0.2
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_group: [2, 3] # user groups 

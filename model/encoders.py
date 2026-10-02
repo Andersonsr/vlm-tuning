@@ -18,7 +18,7 @@ from peft import LoraConfig, get_peft_model
 from adapter import ResidualProjection
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
-
+import random
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
@@ -35,16 +35,72 @@ def resize_transform(image: Image, image_size: int = 224, patch_size: int = 16,)
     image_resized = TF.to_tensor(TF.resize(image, (h_patches * patch_size, w_patches * patch_size)))
     return TF.normalize(image_resized, mean=IMAGENET_MEAN, std=IMAGENET_STD)
 
-def crop_transform(path: list, crop_size: int = 224, patch_size: int = 16) -> torch.Tensor:
+def crop_transform(
+    path: list,
+    crop_size: int = 224,
+    patch_size: int = 16,
+    max_shift: float = 0.0,
+) -> torch.Tensor:
     image = Image.open(path[0])
-    center_x = image.width // 2
-    center_y = image.height // 2
+
+    w, h = image.size
+
+    if w < crop_size or h < crop_size:
+        raise ValueError(
+            f"Image size ({w}, {h}) is smaller than crop size ({crop_size}, {crop_size})"
+        )
+
+    center_x = w // 2
+    center_y = h // 2
+
+    max_shift_x = min(
+        int(crop_size * max_shift),
+        center_x - crop_size // 2,
+        w - (center_x + crop_size // 2),
+    )
+
+    max_shift_y = min(
+        int(crop_size * max_shift),
+        center_y - crop_size // 2,
+        h - (center_y + crop_size // 2),
+    )
+
+    shift_x = random.randint(-max_shift_x, max_shift_x)
+    shift_y = random.randint(-max_shift_y, max_shift_y)
+    # print(f'shift_x: {shift_x}, shift_y: {shift_y}')
+    
+    center_x += shift_x
+    center_y += shift_y
+
     left = center_x - crop_size // 2
     top = center_y - crop_size // 2
-    right = center_x + crop_size // 2
-    bottom = center_y + crop_size // 2
+    right = left + crop_size
+    bottom = top + crop_size
+
     cropped_image = image.crop((left, top, right, bottom))
-    return resize_transform(cropped_image, image_size=crop_size, patch_size=patch_size)
+
+    # 50% de chance de flip horizontal
+    if random.random() < 0.5:
+        cropped_image = cropped_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+
+    return resize_transform(
+        cropped_image,
+        image_size=crop_size,
+        patch_size=patch_size,
+    )
+
+
+
+# def crop_transform(path: list, crop_size: int = 224, patch_size: int = 16) -> torch.Tensor:
+#     image = Image.open(path[0])
+#     center_x = image.width // 2
+#     center_y = image.height // 2
+#     left = center_x - crop_size // 2
+#     top = center_y - crop_size // 2
+#     right = center_x + crop_size // 2
+#     bottom = center_y + crop_size // 2
+#     cropped_image = image.crop((left, top, right, bottom))
+#     return resize_transform(cropped_image, image_size=crop_size, patch_size=patch_size)
 
 def get_model(conf):
     split = conf.model.name.split(':')

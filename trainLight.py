@@ -31,6 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--vision_head', default=False, action='store_true')
     parser.add_argument('--average_local', default=False, action='store_true', help='use to average to use average of patch embedings with the cls embedding')
     parser.add_argument('--multiresolution', action='store_true', default=False, help='use to enable multiresolution training')
+    parser.add_argument('--random_shift', type=float, default=0.0, help='random shift for cropping')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
@@ -57,6 +58,8 @@ if __name__ == '__main__':
     if args.lr is not None:
         conf.train.learning_rate = args.lr
 
+    if args.random_shift is not None:
+        conf.dataset.crop_random_shift = args.random_shift
     
     conf.model.vision_head_only = args.vision_head
     conf.train.gpus = args.gpus
@@ -99,7 +102,7 @@ if __name__ == '__main__':
             train_dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.train_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16), # 2nd dim is the largest dim
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, conf.dataset.crop_random_shift), # 2nd dim is the largest dim
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -113,7 +116,7 @@ if __name__ == '__main__':
                 train_dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.train_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, conf.dataset.crop_random_shift), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,
@@ -149,7 +152,7 @@ if __name__ == '__main__':
             dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.val_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16), 
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, 0.0), 
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -164,7 +167,7 @@ if __name__ == '__main__':
                 dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.val_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, 0.0), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,
