@@ -40,9 +40,9 @@ dataset:
   val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
   test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv' 
   random: true
-  crop_random_shift: 0.2
-  geometric_aug: false # random 90 degree rotations, no interpolation (train only)
-  spectral_aug: false # NLM, equalization, contrast stretch, sharpen, dichromacy, color cast, vignette, brightness (train only)
+  geometric_aug: false # random crop shift (up to 20%), horizontal flip and 90 degree rotations, no interpolation (train only)
+  spectral_aug: false # equalization, contrast stretch, sharpen, dichromacy, color cast, vignette, brightness (train only)
+  nlm_aug: false # NLM denoising with probability 0.1, slow and needs opencv (train only)
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_group: [2, 3] # user groups 

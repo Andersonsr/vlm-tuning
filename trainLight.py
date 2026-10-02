@@ -31,7 +31,9 @@ if __name__ == '__main__':
     parser.add_argument('--vision_head', default=False, action='store_true')
     parser.add_argument('--average_local', default=False, action='store_true', help='use to average to use average of patch embedings with the cls embedding')
     parser.add_argument('--multiresolution', action='store_true', default=False, help='use to enable multiresolution training')
-    parser.add_argument('--random_shift', type=float, default=0.0, help='random shift for cropping')
+    parser.add_argument('--geometric_aug', action='store_true', default=None, help='enable geometric augmentation (random crop shift, horizontal flip and 90 degree rotations) in training')
+    parser.add_argument('--spectral_aug', action='store_true', default=None, help='enable spectral augmentation (equalization, contrast, sharpen, dichromacy, color cast, vignette, brightness) in training')
+    parser.add_argument('--nlm_aug', action='store_true', default=None, help='enable NLM denoising augmentation in training (slow, needs opencv)')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
 
@@ -58,8 +60,14 @@ if __name__ == '__main__':
     if args.lr is not None:
         conf.train.learning_rate = args.lr
 
-    if args.random_shift is not None:
-        conf.dataset.crop_random_shift = args.random_shift
+    if args.geometric_aug is not None:
+        conf.dataset.geometric_aug = args.geometric_aug
+
+    if args.spectral_aug is not None:
+        conf.dataset.spectral_aug = args.spectral_aug
+
+    if args.nlm_aug is not None:
+        conf.dataset.nlm_aug = args.nlm_aug
     
     conf.model.vision_head_only = args.vision_head
     conf.train.gpus = args.gpus
@@ -99,12 +107,13 @@ if __name__ == '__main__':
         train_datasets = []
         geometric_aug = getattr(conf.dataset, 'geometric_aug', False)
         spectral_aug = getattr(conf.dataset, 'spectral_aug', False)
+        nlm_aug = getattr(conf.dataset, 'nlm_aug', False)
         for idx in conf.dataset.geo_index:
 
             train_dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.train_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, conf.dataset.crop_random_shift, geometric_aug, spectral_aug), # 2nd dim is the largest dim
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug), # 2nd dim is the largest dim
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -118,7 +127,7 @@ if __name__ == '__main__':
                 train_dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.train_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, conf.dataset.crop_random_shift, geometric_aug, spectral_aug), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,
@@ -154,7 +163,7 @@ if __name__ == '__main__':
             dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.val_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, 0.0), 
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16), 
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -169,12 +178,12 @@ if __name__ == '__main__':
                 dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.val_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, 0.0), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,
                     size= conf.dataset.resolutions[-1],
-                    randomImage=True,
+                    randomImage=False,
                     larger=False    
                     )
                 val_datasets.append(dataset)

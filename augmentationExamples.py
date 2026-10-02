@@ -50,7 +50,7 @@ def make_grid(tiles, ncols, tile_size):
     return grid
 
 
-def save_examples(path, out_dir, crop_size, n_random, max_shift, tile_size, save_tiles):
+def save_examples(path, out_dir, crop_size, n_random, max_shift, tile_size, save_tiles, nlm):
     image = Image.open(path).convert('RGB')
     w, h = image.size
     if w < crop_size or h < crop_size:
@@ -78,7 +78,7 @@ def save_examples(path, out_dir, crop_size, n_random, max_shift, tile_size, save
     # full training pipeline (random shift + geometric + spectral), as returned by crop_transform
     pipeline = [('original', original)]
     for i in range(n_random):
-        x = crop_transform([path], crop_size, 16, max_shift, geometric=True, spectral=True)
+        x = crop_transform([path], crop_size, 16, geometric=True, spectral=True, nlm=nlm, max_shift=max_shift)
         pipeline.append((f'pipeline {i}', denormalize(x)))
 
     ncols = 4
@@ -100,6 +100,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_random', type=int, default=7, help='random pipeline samples per image')
     parser.add_argument('--random_shift', type=float, default=0.2, help='max shift used in the pipeline examples')
     parser.add_argument('--tile_size', type=int, default=256, help='size of each tile in the grids')
+    parser.add_argument('--nlm', action='store_true', default=False, help='include NLM denoising in the pipeline examples')
     parser.add_argument('--save_tiles', action='store_true', default=False, help='also save every example as a separate image')
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
@@ -112,4 +113,4 @@ if __name__ == '__main__':
         images = random.sample(images, args.num_images)
 
     for path in images:
-        save_examples(path, args.output_dir, args.crop_size, args.num_random, args.random_shift, args.tile_size, args.save_tiles)
+        save_examples(path, args.output_dir, args.crop_size, args.num_random, args.random_shift, args.tile_size, args.save_tiles, args.nlm)

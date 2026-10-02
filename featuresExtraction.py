@@ -70,7 +70,7 @@ if __name__ == '__main__':
                 conf.dataset.geo_group,
                 idx,
                 size= conf.dataset.resolutions[-1],
-                randomImage=True,
+                randomImage=False,
                 larger=False    
                 )
             datasets.append(dataset)
@@ -81,7 +81,7 @@ if __name__ == '__main__':
             sampler = DistributedSingleDatasetBatchSampler(
                 dataset_lengths=[len(d) for d in datasets],
                 batch_size=conf.train.batch_size,
-                shuffle=True,
+                shuffle=False,
                 drop_last=True,
             )
             

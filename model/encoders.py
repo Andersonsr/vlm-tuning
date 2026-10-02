@@ -45,8 +45,8 @@ def resize_transform(image, image_size: int = 224, patch_size: int = 16,) -> tor
 
 # Augmentations adapted from https://github.com/rafaelrubo/lithofaciesclassification
 # (Rubo et al., 2022, "Carbonate lithofacies classification in optical microscopy").
-# Geometric: rotations restricted to multiples of 90 degrees plus flips, so no interpolation is needed
-#            (the repo's free rotation, zoom and shear are left out); shifts are handled by max_shift.
+# Geometric: random shift of the crop window, horizontal flip and rotations restricted to multiples of 90
+#            degrees, so no interpolation is needed (the repo's free rotation, zoom and shear are left out).
 # Spectral:  ImageJ macro (NLM denoising, histogram equalization, contrast stretching, sharpen,
 #            dichromacy, color casting, vignette) plus Keras brightness_range=[0.6, 1.0].
 
@@ -54,20 +54,24 @@ ROTATIONS = [None, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_180, Image.
 
 
 def geometric_augment(image: Image) -> Image:
-    """Random rotation by 0, 90, 180 or 270 degrees (lossless pixel transpose).
+    """Random horizontal flip and rotation by 0, 90, 180 or 270 degrees (lossless pixel transposes).
 
-    Combined with the random horizontal flip in crop_transform this covers all 8 rotations/reflections
-    of the square crop, vertical flips included.
+    Together they cover all 8 rotations/reflections of the square crop, vertical flips included.
     """
+    # 50% de chance de flip horizontal
+    if random.random() < 0.5:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
     rotation = random.choice(ROTATIONS)
     return image if rotation is None else image.transpose(rotation)
 
 
 def _stretch(x: torch.Tensor, saturated: float = 0.3) -> torch.Tensor:
-    # ImageJ "Enhance Contrast" (saturated=0.3): saturate saturated% of pixels, split between both tails
-    q = saturated / 200.0
-    lo = torch.quantile(x.flatten(), q)
-    hi = torch.quantile(x.flatten(), 1 - q)
+    # ImageJ "Enhance Contrast" (saturated=0.3): saturate saturated% of pixels, split between both tails.
+    # thresholds from the 8-bit histogram, like ImageJ (much faster than torch.quantile)
+    cdf = torch.bincount((x * 255).round().long().flatten(), minlength=256).cumsum(0)
+    q = saturated / 200.0 * cdf[-1]
+    lo = (cdf > q).nonzero()[0, 0] / 255
+    hi = (cdf >= cdf[-1] - q).nonzero()[0, 0] / 255
     return ((x - lo) / (hi - lo).clamp(min=1e-6)).clamp(0, 1)
 
 
@@ -130,8 +134,9 @@ def _brightness(x: torch.Tensor) -> torch.Tensor:
 _NLM_WARNED = False
 
 
-def _nlm(x: torch.Tensor, sigma: float = 15.0) -> torch.Tensor:
-    # ImageJ "Non-local Means Denoising" (sigma=15); needs opencv, skipped if unavailable
+def _nlm(x: torch.Tensor, sigma: float = 15.0, search_window: int = 11) -> torch.Tensor:
+    # ImageJ "Non-local Means Denoising" (sigma=15); needs opencv, skipped if unavailable.
+    # search_window=11 instead of opencv's default 21: ~3.5x faster, slightly weaker denoising
     global _NLM_WARNED
     try:
         import cv2
@@ -141,7 +146,7 @@ def _nlm(x: torch.Tensor, sigma: float = 15.0) -> torch.Tensor:
             _NLM_WARNED = True
         return x
     img = (x.permute(1, 2, 0).numpy() * 255).round().astype('uint8')
-    img = cv2.fastNlMeansDenoisingColored(img, None, sigma, sigma, 7, 21)
+    img = cv2.fastNlMeansDenoisingColored(img, None, sigma, sigma, 7, search_window)
     return torch.from_numpy(img).permute(2, 0, 1).float() / 255
 
 
@@ -159,13 +164,11 @@ SPECTRAL_OPS = {
 }
 
 
-def spectral_augment(x: torch.Tensor, p: float = 0.8, p_nlm: float = 0.5) -> torch.Tensor:
-    """Applies NLM denoising with probability p_nlm, then one random spectral op with probability p.
+def spectral_augment(x: torch.Tensor, p: float = 0.8) -> torch.Tensor:
+    """Applies one random spectral op with probability p.
 
     :param x: [3, H, W] float tensor in [0, 1]
     """
-    if random.random() < p_nlm:
-        x = _nlm(x)
     if random.random() < p:
         x = random.choice(list(SPECTRAL_OPS.values()))(x)
     return x
@@ -175,10 +178,19 @@ def crop_transform(
     path: list,
     crop_size: int = 224,
     patch_size: int = 16,
-    max_shift: float = 0.0,
     geometric: bool = False,
     spectral: bool = False,
+    nlm: bool = False,
+    max_shift: float = 0.2,
+    p_nlm: float = 0.1,
 ) -> torch.Tensor:
+    """Center crop of crop_size; augmentations are only applied when requested (training).
+
+    :param geometric: random shift of the crop window (up to max_shift * crop_size), horizontal flip and
+        90 degree rotation
+    :param spectral: one random spectral op, see spectral_augment
+    :param nlm: NLM denoising with probability p_nlm, before the spectral op (slow, ~0.15 s per 512px crop)
+    """
     image = Image.open(path[0])
 
     w, h = image.size
@@ -191,24 +203,21 @@ def crop_transform(
     center_x = w // 2
     center_y = h // 2
 
-    max_shift_x = min(
-        int(crop_size * max_shift),
-        center_x - crop_size // 2,
-        w - (center_x + crop_size // 2),
-    )
+    if geometric:
+        max_shift_x = min(
+            int(crop_size * max_shift),
+            center_x - crop_size // 2,
+            w - (center_x + crop_size // 2),
+        )
 
-    max_shift_y = min(
-        int(crop_size * max_shift),
-        center_y - crop_size // 2,
-        h - (center_y + crop_size // 2),
-    )
+        max_shift_y = min(
+            int(crop_size * max_shift),
+            center_y - crop_size // 2,
+            h - (center_y + crop_size // 2),
+        )
 
-    shift_x = random.randint(-max_shift_x, max_shift_x)
-    shift_y = random.randint(-max_shift_y, max_shift_y)
-    # print(f'shift_x: {shift_x}, shift_y: {shift_y}')
-    
-    center_x += shift_x
-    center_y += shift_y
+        center_x += random.randint(-max_shift_x, max_shift_x)
+        center_y += random.randint(-max_shift_y, max_shift_y)
 
     left = center_x - crop_size // 2
     top = center_y - crop_size // 2
@@ -217,15 +226,17 @@ def crop_transform(
 
     cropped_image = image.crop((left, top, right, bottom))
 
-    # 50% de chance de flip horizontal
-    if random.random() < 0.5:
-        cropped_image = cropped_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-
     if geometric:
         cropped_image = geometric_augment(cropped_image)
 
+    if spectral or nlm:
+        cropped_image = TF.to_tensor(cropped_image.convert('RGB'))
+
+    if nlm and random.random() < p_nlm:
+        cropped_image = _nlm(cropped_image)
+
     if spectral:
-        cropped_image = spectral_augment(TF.to_tensor(cropped_image.convert('RGB')))
+        cropped_image = spectral_augment(cropped_image)
 
     return resize_transform(
         cropped_image,
