@@ -19,7 +19,6 @@ from adapter import ResidualProjection
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 import random
-import math
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
@@ -46,54 +45,22 @@ def resize_transform(image, image_size: int = 224, patch_size: int = 16,) -> tor
 
 # Augmentations adapted from https://github.com/rafaelrubo/lithofaciesclassification
 # (Rubo et al., 2022, "Carbonate lithofacies classification in optical microscopy").
-# Geometric: Keras ImageDataGenerator(rotation_range=36, shear_range=0.2, zoom_range=0.2,
-#            horizontal_flip, vertical_flip, fill_mode='reflect'); shifts are handled by max_shift.
+# Geometric: rotations restricted to multiples of 90 degrees plus flips, so no interpolation is needed
+#            (the repo's free rotation, zoom and shear are left out); shifts are handled by max_shift.
 # Spectral:  ImageJ macro (NLM denoising, histogram equalization, contrast stretching, sharpen,
 #            dichromacy, color casting, vignette) plus Keras brightness_range=[0.6, 1.0].
 
-def geometric_crop(
-    image: Image,
-    center_x: int,
-    center_y: int,
-    crop_size: int,
-    rotation: float = 36.0,
-    zoom: float = 0.2,
-    shear: float = 0.2,
-) -> torch.Tensor:
-    """Random rotation / zoom / shear around (center_x, center_y), returning a [3, crop_size, crop_size] tensor.
+ROTATIONS = [None, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_180, Image.Transpose.ROTATE_270]
 
-    A larger context window is cropped first so the transformed crop is filled with real image content;
-    regions outside the image are reflect-padded.
+
+def geometric_augment(image: Image) -> Image:
+    """Random rotation by 0, 90, 180 or 270 degrees (lossless pixel transpose).
+
+    Combined with the random horizontal flip in crop_transform this covers all 8 rotations/reflections
+    of the square crop, vertical flips included.
     """
-    angle = random.uniform(-rotation, rotation)
-    scale = random.uniform(1 - zoom, 1 + zoom)
-    shear_deg = random.uniform(-shear, shear)
-
-    rad = math.radians(abs(angle))
-    ctx = math.ceil(
-        crop_size * (math.cos(rad) + math.sin(rad)) / scale * (1 + math.tan(math.radians(abs(shear_deg))))
-    ) + 2
-
-    w, h = image.size
-    left = center_x - ctx // 2
-    top = center_y - ctx // 2
-    box = (max(left, 0), max(top, 0), min(left + ctx, w), min(top + ctx, h))
-    window = TF.to_tensor(image.crop(box))
-
-    # F.pad order: left, right, top, bottom
-    pad = (box[0] - left, left + ctx - box[2], box[1] - top, top + ctx - box[3])
-    if any(pad):
-        window = F.pad(window.unsqueeze(0), pad, mode='reflect').squeeze(0)
-
-    window = TF.affine(
-        window,
-        angle=angle,
-        translate=[0, 0],
-        scale=scale,
-        shear=[shear_deg, 0.0],
-        interpolation=TF.InterpolationMode.BILINEAR,
-    )
-    return TF.center_crop(window, [crop_size, crop_size])
+    rotation = random.choice(ROTATIONS)
+    return image if rotation is None else image.transpose(rotation)
 
 
 def _stretch(x: torch.Tensor, saturated: float = 0.3) -> torch.Tensor:
@@ -243,30 +210,22 @@ def crop_transform(
     center_x += shift_x
     center_y += shift_y
 
-    if geometric or spectral:
-        image = image.convert('RGB')
+    left = center_x - crop_size // 2
+    top = center_y - crop_size // 2
+    right = left + crop_size
+    bottom = top + crop_size
 
-    if geometric:
-        cropped_image = geometric_crop(image, center_x, center_y, crop_size)
-    else:
-        left = center_x - crop_size // 2
-        top = center_y - crop_size // 2
-        right = left + crop_size
-        bottom = top + crop_size
-
-        cropped_image = image.crop((left, top, right, bottom))
+    cropped_image = image.crop((left, top, right, bottom))
 
     # 50% de chance de flip horizontal
     if random.random() < 0.5:
-        cropped_image = TF.hflip(cropped_image)
+        cropped_image = cropped_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
 
-    if geometric and random.random() < 0.5:
-        cropped_image = TF.vflip(cropped_image)
+    if geometric:
+        cropped_image = geometric_augment(cropped_image)
 
     if spectral:
-        if not isinstance(cropped_image, torch.Tensor):
-            cropped_image = TF.to_tensor(cropped_image)
-        cropped_image = spectral_augment(cropped_image)
+        cropped_image = spectral_augment(TF.to_tensor(cropped_image.convert('RGB')))
 
     return resize_transform(
         cropped_image,
