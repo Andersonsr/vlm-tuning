@@ -19,6 +19,7 @@ from adapter import ResidualProjection
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 import random
+import math
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
@@ -28,18 +29,188 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-def resize_transform(image: Image, image_size: int = 224, patch_size: int = 16,) -> torch.Tensor:
-    w, h = image.size
+def resize_transform(image, image_size: int = 224, patch_size: int = 16,) -> torch.Tensor:
+    # image may be a PIL image or a [C, H, W] float tensor in [0, 1]
+    is_tensor = isinstance(image, torch.Tensor)
+    if is_tensor:
+        h, w = image.shape[-2:]
+    else:
+        w, h = image.size
     h_patches = int(image_size / patch_size)
     w_patches = int((w * image_size) / (h * patch_size))
-    image_resized = TF.to_tensor(TF.resize(image, (h_patches * patch_size, w_patches * patch_size)))
+    image_resized = TF.resize(image, (h_patches * patch_size, w_patches * patch_size))
+    if not is_tensor:
+        image_resized = TF.to_tensor(image_resized)
     return TF.normalize(image_resized, mean=IMAGENET_MEAN, std=IMAGENET_STD)
+
+
+# Augmentations adapted from https://github.com/rafaelrubo/lithofaciesclassification
+# (Rubo et al., 2022, "Carbonate lithofacies classification in optical microscopy").
+# Geometric: Keras ImageDataGenerator(rotation_range=36, shear_range=0.2, zoom_range=0.2,
+#            horizontal_flip, vertical_flip, fill_mode='reflect'); shifts are handled by max_shift.
+# Spectral:  ImageJ macro (NLM denoising, histogram equalization, contrast stretching, sharpen,
+#            dichromacy, color casting, vignette) plus Keras brightness_range=[0.6, 1.0].
+
+def geometric_crop(
+    image: Image,
+    center_x: int,
+    center_y: int,
+    crop_size: int,
+    rotation: float = 36.0,
+    zoom: float = 0.2,
+    shear: float = 0.2,
+) -> torch.Tensor:
+    """Random rotation / zoom / shear around (center_x, center_y), returning a [3, crop_size, crop_size] tensor.
+
+    A larger context window is cropped first so the transformed crop is filled with real image content;
+    regions outside the image are reflect-padded.
+    """
+    angle = random.uniform(-rotation, rotation)
+    scale = random.uniform(1 - zoom, 1 + zoom)
+    shear_deg = random.uniform(-shear, shear)
+
+    rad = math.radians(abs(angle))
+    ctx = math.ceil(
+        crop_size * (math.cos(rad) + math.sin(rad)) / scale * (1 + math.tan(math.radians(abs(shear_deg))))
+    ) + 2
+
+    w, h = image.size
+    left = center_x - ctx // 2
+    top = center_y - ctx // 2
+    box = (max(left, 0), max(top, 0), min(left + ctx, w), min(top + ctx, h))
+    window = TF.to_tensor(image.crop(box))
+
+    # F.pad order: left, right, top, bottom
+    pad = (box[0] - left, left + ctx - box[2], box[1] - top, top + ctx - box[3])
+    if any(pad):
+        window = F.pad(window.unsqueeze(0), pad, mode='reflect').squeeze(0)
+
+    window = TF.affine(
+        window,
+        angle=angle,
+        translate=[0, 0],
+        scale=scale,
+        shear=[shear_deg, 0.0],
+        interpolation=TF.InterpolationMode.BILINEAR,
+    )
+    return TF.center_crop(window, [crop_size, crop_size])
+
+
+def _stretch(x: torch.Tensor, saturated: float = 0.3) -> torch.Tensor:
+    # ImageJ "Enhance Contrast" (saturated=0.3): saturate saturated% of pixels, split between both tails
+    q = saturated / 200.0
+    lo = torch.quantile(x.flatten(), q)
+    hi = torch.quantile(x.flatten(), 1 - q)
+    return ((x - lo) / (hi - lo).clamp(min=1e-6)).clamp(0, 1)
+
+
+def _equalize(x: torch.Tensor) -> torch.Tensor:
+    return TF.equalize((x * 255).round().to(torch.uint8)).float() / 255
+
+
+def _sharpen(x: torch.Tensor) -> torch.Tensor:
+    # ImageJ Process > Sharpen kernel
+    kernel = torch.tensor([[-1., -1., -1.], [-1., 12., -1.], [-1., -1., -1.]]) / 4
+    kernel = kernel.to(x).expand(x.shape[0], 1, 3, 3)
+    out = F.conv2d(F.pad(x.unsqueeze(0), (1, 1, 1, 1), mode='replicate'), kernel, groups=x.shape[0])
+    return out.squeeze(0).clamp(0, 1)
+
+
+# Machado et al. (2009) dichromacy simulation matrices (severity 1.0), applied in linear RGB
+DEUTERANOPE = torch.tensor([
+    [0.367322, 0.860646, -0.227968],
+    [0.280085, 0.672501, 0.047413],
+    [-0.011820, 0.042940, 0.968881],
+])
+TRITANOPE = torch.tensor([
+    [1.255528, -0.076749, -0.178779],
+    [-0.078411, 0.930809, 0.147602],
+    [0.004733, 0.691367, 0.303900],
+])
+
+
+def _dichromacy(x: torch.Tensor, matrix: torch.Tensor) -> torch.Tensor:
+    linear = torch.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4)
+    linear = torch.einsum('ij,jhw->ihw', matrix.to(x), linear).clamp(0, 1)
+    return torch.where(linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055)
+
+
+def _color_cast(x: torch.Tensor, keep: int) -> torch.Tensor:
+    # stretch every channel except `keep`, so the image is cast towards that channel (0=R, 1=G, 2=B)
+    out = x.clone()
+    for c in range(3):
+        if c != keep:
+            out[c] = _stretch(x[c])
+    return out
+
+
+def _vignette(x: torch.Tensor) -> torch.Tensor:
+    # radial shading, approximating the BaSiC flat-field profile used in the ImageJ macro
+    _, h, w = x.shape
+    strength = random.uniform(0.2, 0.5)
+    cy = h / 2 + random.uniform(-0.1, 0.1) * h
+    cx = w / 2 + random.uniform(-0.1, 0.1) * w
+    ys = torch.arange(h, dtype=x.dtype).view(-1, 1)
+    xs = torch.arange(w, dtype=x.dtype).view(1, -1)
+    r2 = ((ys - cy) / (h / 2)) ** 2 + ((xs - cx) / (w / 2)) ** 2
+    return (x * (1 - strength * r2 / r2.max())).clamp(0, 1)
+
+
+def _brightness(x: torch.Tensor) -> torch.Tensor:
+    return (x * random.uniform(0.6, 1.0)).clamp(0, 1)
+
+
+_NLM_WARNED = False
+
+
+def _nlm(x: torch.Tensor, sigma: float = 15.0) -> torch.Tensor:
+    # ImageJ "Non-local Means Denoising" (sigma=15); needs opencv, skipped if unavailable
+    global _NLM_WARNED
+    try:
+        import cv2
+    except ImportError:
+        if not _NLM_WARNED:
+            print('WARNING: opencv not installed, skipping NLM denoising augmentation')
+            _NLM_WARNED = True
+        return x
+    img = (x.permute(1, 2, 0).numpy() * 255).round().astype('uint8')
+    img = cv2.fastNlMeansDenoisingColored(img, None, sigma, sigma, 7, 21)
+    return torch.from_numpy(img).permute(2, 0, 1).float() / 255
+
+
+SPECTRAL_OPS = {
+    'equalize': _equalize,
+    'stretch': _stretch,
+    'sharpen': _sharpen,
+    'deuteranope': lambda x: _dichromacy(x, DEUTERANOPE),
+    'tritanope': lambda x: _dichromacy(x, TRITANOPE),
+    'red_cast': lambda x: _color_cast(x, 0),
+    'green_cast': lambda x: _color_cast(x, 1),
+    'blue_cast': lambda x: _color_cast(x, 2),
+    'vignette': _vignette,
+    'brightness': _brightness,
+}
+
+
+def spectral_augment(x: torch.Tensor, p: float = 0.8, p_nlm: float = 0.5) -> torch.Tensor:
+    """Applies NLM denoising with probability p_nlm, then one random spectral op with probability p.
+
+    :param x: [3, H, W] float tensor in [0, 1]
+    """
+    if random.random() < p_nlm:
+        x = _nlm(x)
+    if random.random() < p:
+        x = random.choice(list(SPECTRAL_OPS.values()))(x)
+    return x
+
 
 def crop_transform(
     path: list,
     crop_size: int = 224,
     patch_size: int = 16,
     max_shift: float = 0.0,
+    geometric: bool = False,
+    spectral: bool = False,
 ) -> torch.Tensor:
     image = Image.open(path[0])
 
@@ -72,16 +243,30 @@ def crop_transform(
     center_x += shift_x
     center_y += shift_y
 
-    left = center_x - crop_size // 2
-    top = center_y - crop_size // 2
-    right = left + crop_size
-    bottom = top + crop_size
+    if geometric or spectral:
+        image = image.convert('RGB')
 
-    cropped_image = image.crop((left, top, right, bottom))
+    if geometric:
+        cropped_image = geometric_crop(image, center_x, center_y, crop_size)
+    else:
+        left = center_x - crop_size // 2
+        top = center_y - crop_size // 2
+        right = left + crop_size
+        bottom = top + crop_size
+
+        cropped_image = image.crop((left, top, right, bottom))
 
     # 50% de chance de flip horizontal
     if random.random() < 0.5:
-        cropped_image = cropped_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        cropped_image = TF.hflip(cropped_image)
+
+    if geometric and random.random() < 0.5:
+        cropped_image = TF.vflip(cropped_image)
+
+    if spectral:
+        if not isinstance(cropped_image, torch.Tensor):
+            cropped_image = TF.to_tensor(cropped_image)
+        cropped_image = spectral_augment(cropped_image)
 
     return resize_transform(
         cropped_image,

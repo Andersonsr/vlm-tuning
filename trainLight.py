@@ -97,12 +97,14 @@ if __name__ == '__main__':
 
     else:
         train_datasets = []
+        geometric_aug = getattr(conf.dataset, 'geometric_aug', False)
+        spectral_aug = getattr(conf.dataset, 'spectral_aug', False)
         for idx in conf.dataset.geo_index:
 
             train_dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.train_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, conf.dataset.crop_random_shift), # 2nd dim is the largest dim
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, conf.dataset.crop_random_shift, geometric_aug, spectral_aug), # 2nd dim is the largest dim
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -116,7 +118,7 @@ if __name__ == '__main__':
                 train_dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.train_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, conf.dataset.crop_random_shift), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, conf.dataset.crop_random_shift, geometric_aug, spectral_aug), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,

@@ -41,6 +41,8 @@ dataset:
   test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv' 
   random: true
   crop_random_shift: 0.2
+  geometric_aug: false # rotation, zoom, shear, vertical flip (train only)
+  spectral_aug: false # NLM, equalization, contrast stretch, sharpen, dichromacy, color cast, vignette, brightness (train only)
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_group: [2, 3] # user groups 
