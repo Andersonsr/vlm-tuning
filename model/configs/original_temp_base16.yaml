@@ -26,7 +26,7 @@ train:
   monitor: val_loss
   learning_rate: 0.0005
   cooling:
-    apply: false # 'step', 'linear' or false
+    apply: false # 'step', 'linear', 'cosine' or false
     final_temp: 59.32769 
     iterations: 1 # cooling duration, total batches ratio
 dataset:

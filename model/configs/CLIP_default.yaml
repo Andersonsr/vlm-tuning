@@ -22,7 +22,7 @@ train:
   epochs: 100
   learning_rate: 0.0005
   cooling:
-    apply: linear # 'step', 'linear' or false
+    apply: linear # 'step', 'linear', 'cosine' or false
     final_temp: 34.723667
     iterations: 40000
 dataset:

@@ -19,6 +19,7 @@ from adapter import ResidualProjection
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 import random
+import math
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
@@ -463,9 +464,13 @@ class CLIP(L.LightningModule):
 
         elif self.cooling == 'step':
             delta = 100.0 - self.target_temperature
-            num_steps = self.cooling_steps // (delta // 5)
+            num_steps = max(self.cooling_steps // max(delta // 5, 1), 1)
             cur_step = self.step // num_steps
-            temperature = max(self.initial_temperature - (cur_step * 5), self.final_temperature)
+            temperature = max(100.0 - (cur_step * 5), self.target_temperature)
+
+        elif self.cooling == 'cosine':
+            progress = min(self.step / self.cooling_steps, 1.0)
+            temperature = self.target_temperature + 0.5 * (100.0 - self.target_temperature) * (1 + math.cos(math.pi * progress))
 
         else:
             raise ValueError(f'Cooling rate {self.cooling} not recognized')
