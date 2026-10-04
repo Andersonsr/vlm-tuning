@@ -367,6 +367,7 @@ class CLIP(L.LightningModule):
 
         if conf.train.cooling.apply:
             self.cooling = conf.train.cooling.apply
+            self.initial_temperature = conf.model.temperature
             self.target_temperature = conf.train.cooling.final_temp
             self.cooling_steps = conf.train.cooling.iterations
             self.step = 0
@@ -459,18 +460,18 @@ class CLIP(L.LightningModule):
 
     def update_temperature(self):
         if self.cooling == 'linear':
-            cooling_rate = (100.0 - self.target_temperature) / self.cooling_steps
-            temperature = max(100.0 - (self.step * cooling_rate), self.target_temperature)
+            cooling_rate = (self.initial_temperature - self.target_temperature) / self.cooling_steps
+            temperature = max(self.initial_temperature - (self.step * cooling_rate), self.target_temperature)
 
         elif self.cooling == 'step':
-            delta = 100.0 - self.target_temperature
+            delta = self.initial_temperature - self.target_temperature
             num_steps = max(self.cooling_steps // max(delta // 5, 1), 1)
             cur_step = self.step // num_steps
-            temperature = max(100.0 - (cur_step * 5), self.target_temperature)
+            temperature = max(self.initial_temperature - (cur_step * 5), self.target_temperature)
 
         elif self.cooling == 'cosine':
             progress = min(self.step / self.cooling_steps, 1.0)
-            temperature = self.target_temperature + 0.5 * (100.0 - self.target_temperature) * (1 + math.cos(math.pi * progress))
+            temperature = self.target_temperature + 0.5 * (self.initial_temperature - self.target_temperature) * (1 + math.cos(math.pi * progress))
 
         else:
             raise ValueError(f'Cooling rate {self.cooling} not recognized')
