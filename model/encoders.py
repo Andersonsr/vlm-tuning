@@ -51,7 +51,7 @@ def resize_transform(image, image_size: int = 224, patch_size: int = 16,) -> tor
 # Spectral:  ImageJ macro (NLM denoising, histogram equalization, contrast stretching, sharpen,
 #            dichromacy, color casting, vignette) plus Keras brightness_range=[0.6, 1.0].
 
-ROTATIONS = [None, Image.Transpose.ROTATE_90, Image.Transpose.ROTATE_180, Image.Transpose.ROTATE_270]
+ROTATIONS = [None, Image.Transpose.ROTATE_90, None, Image.Transpose.ROTATE_180, None, Image.Transpose.ROTATE_270]
 
 
 def geometric_augment(image: Image) -> Image:
