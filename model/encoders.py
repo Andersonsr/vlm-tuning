@@ -184,12 +184,13 @@ def crop_transform(
     nlm: bool = False,
     max_shift: float = 0.2,
     p_nlm: float = 0.1,
+    p_spectral: float = 0.8,
 ) -> torch.Tensor:
     """Center crop of crop_size; augmentations are only applied when requested (training).
 
     :param geometric: random shift of the crop window (up to max_shift * crop_size), horizontal flip and
         90 degree rotation
-    :param spectral: one random spectral op, see spectral_augment
+    :param spectral: one random spectral op with probability p_spectral, see spectral_augment
     :param nlm: NLM denoising with probability p_nlm, before the spectral op (slow, ~0.15 s per 512px crop)
     """
     image = Image.open(path[0])
@@ -237,7 +238,7 @@ def crop_transform(
         cropped_image = _nlm(cropped_image)
 
     if spectral:
-        cropped_image = spectral_augment(cropped_image)
+        cropped_image = spectral_augment(cropped_image, p=p_spectral)
 
     return resize_transform(
         cropped_image,

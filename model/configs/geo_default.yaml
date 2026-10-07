@@ -42,6 +42,7 @@ dataset:
   random: true
   geometric_aug: false # random crop shift (up to 20%), horizontal flip and 90 degree rotations, no interpolation (train only)
   spectral_aug: false # equalization, contrast stretch, sharpen, dichromacy, color cast, vignette, brightness (train only)
+  p_spectral: 0.8 # probability of applying one of the spectral augmentations when spectral_aug is enabled
   nlm_aug: false # NLM denoising with probability 0.1, slow and needs opencv (train only)
   geo_index: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
   geo_index_val: [1] # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}

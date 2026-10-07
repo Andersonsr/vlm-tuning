@@ -34,6 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--multiresolution', action='store_true', default=False, help='use to enable multiresolution training')
     parser.add_argument('--geometric_aug', action='store_true', default=None, help='enable geometric augmentation (random crop shift, horizontal flip and 90 degree rotations) in training')
     parser.add_argument('--spectral_aug', action='store_true', default=None, help='enable spectral augmentation (equalization, contrast, sharpen, dichromacy, color cast, vignette, brightness) in training')
+    parser.add_argument('--p_spectral', type=float, default=None, help='probability of applying one of the spectral augmentations, used to overwrite config p_spectral')
     parser.add_argument('--nlm_aug', action='store_true', default=None, help='enable NLM denoising augmentation in training (slow, needs opencv)')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
@@ -66,6 +67,9 @@ if __name__ == '__main__':
 
     if args.spectral_aug is not None:
         conf.dataset.spectral_aug = args.spectral_aug
+
+    if args.p_spectral is not None:
+        conf.dataset.p_spectral = args.p_spectral
 
     if args.nlm_aug is not None:
         conf.dataset.nlm_aug = args.nlm_aug
@@ -109,12 +113,13 @@ if __name__ == '__main__':
         geometric_aug = getattr(conf.dataset, 'geometric_aug', False)
         spectral_aug = getattr(conf.dataset, 'spectral_aug', False)
         nlm_aug = getattr(conf.dataset, 'nlm_aug', False)
+        p_spectral = getattr(conf.dataset, 'p_spectral', 0.8)
         for idx in conf.dataset.geo_index:
 
             train_dataset = GeoDataset(
                 conf.dataset.root, 
                 conf.dataset.train_annotation, 
-                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug), # 2nd dim is the largest dim
+                lambda x: crop_transform(x,  conf.dataset.resolutions[-1], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug, p_spectral=p_spectral), # 2nd dim is the largest dim
                 model.tokenize, 
                 conf.dataset.geo_group,
                 idx,
@@ -128,7 +133,7 @@ if __name__ == '__main__':
                 train_dataset = GeoDataset(
                     conf.dataset.root, 
                     conf.dataset.train_annotation, 
-                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug), 
+                    lambda x: crop_transform(x,  conf.dataset.resolutions[0], 16, geometric=geometric_aug, spectral=spectral_aug, nlm=nlm_aug, p_spectral=p_spectral), 
                     model.tokenize, 
                     conf.dataset.geo_group,
                     idx,
