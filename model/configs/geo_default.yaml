@@ -24,15 +24,15 @@ model:
 train:
   batch_size: 192 # * n_gpus
   gpus: 1
-  epochs: 25
+  epochs: 200
   local_loss: false 
   learning_rate: 0.0005
   monitor: 'val_loss' #'composition_val_loss' 'classification_t2i r@10'
   multi_positive: false
   cooling:
-    apply: false # 'step', 'linear', 'cosine' or false
-    final_temp: 59.32769 
-    iterations: 0.9 # cooling duration, total batches ratio
+    apply: cosine # 'step', 'linear', 'cosine' or false
+    final_temp: 30.0
+    iterations: 1.0 # cooling duration, total batches ratio
 dataset:
   name: 'geo' # 'nwpu', 'coco', 'geo'
   root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'

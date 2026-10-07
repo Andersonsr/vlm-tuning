@@ -20,5 +20,5 @@ tt.py
 *.json
 idealTemperatureTest.py
 runTrainVarious.sh
-*__pycache__*
+*__pycache__/
 *.pyc
