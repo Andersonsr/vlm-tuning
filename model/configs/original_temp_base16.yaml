@@ -19,7 +19,10 @@ model:
   calibrate: false
   load_weights: false # false or path to file
   train_temperature: false
+  sigmoid_bias: -10 # initial bias of the siglip loss
+  train_bias: false # learn the sigmoid bias (siglip loss only)
 train:
+  loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
   batch_size: 128
   epochs: 30
   local_loss: false

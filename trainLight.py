@@ -28,6 +28,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default=None, type=float)
     parser.add_argument('--strategy', type=str, default='auto', choices=['fsdp', 'deepspeed_stage_2',])
     parser.add_argument('--temp', type=float, default=None, help='used to overwrite config temperature')
+    parser.add_argument('--loss', type=str, default=None, choices=['contrastive', 'siglip'], help='used to overwrite config loss')
+    parser.add_argument('--sigmoid_bias', type=float, default=None, help='initial sigmoid bias for the siglip loss, used to overwrite config sigmoid_bias')
     parser.add_argument('--batch_size', type=int, default=None, help='use to overwrite config batch size')
     parser.add_argument('--vision_head', default=False, action='store_true')
     parser.add_argument('--average_local', default=False, action='store_true', help='use to average to use average of patch embedings with the cls embedding')
@@ -49,6 +51,12 @@ if __name__ == '__main__':
 
     if args.temp is not None:
         conf.model.temperature = args.temp
+
+    if args.loss is not None:
+        conf.train.loss = args.loss
+
+    if args.sigmoid_bias is not None:
+        conf.model.sigmoid_bias = args.sigmoid_bias
 
     if args.batch_size is not None:
         conf.train.batch_size = args.batch_size

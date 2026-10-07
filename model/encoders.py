@@ -430,6 +430,12 @@ class CLIP(L.LightningModule):
 
             # print(self.model)
 
+        # 'contrastive' (softmax, CLIP) or 'siglip' (pairwise sigmoid)
+        self.loss_type = conf.train.loss if hasattr(conf.train, 'loss') else 'contrastive'
+        sigmoid_bias = conf.model.sigmoid_bias if hasattr(conf.model, 'sigmoid_bias') else -10.
+        train_bias = conf.model.train_bias if hasattr(conf.model, 'train_bias') else False
+        self.logit_bias = torch.nn.Parameter(torch.ones(1) * sigmoid_bias, requires_grad=train_bias)
+
         self.save_hyperparameters(conf) 
 
 
@@ -506,7 +512,7 @@ class CLIP(L.LightningModule):
         if state_dict is None:
             state_dict = self.state_dict()
         trainable = {name for name, param in self.named_parameters() if param.requires_grad}
-        return {k: v for k, v in state_dict.items() if 'lora_' in k or k in trainable or k.endswith('logit_scale')}
+        return {k: v for k, v in state_dict.items() if 'lora_' in k or k in trainable or k.endswith('logit_scale') or k.endswith('logit_bias')}
 
     def on_save_checkpoint(self, checkpoint):
         if self.save_lora_only and 'state_dict' in checkpoint:
@@ -556,7 +562,12 @@ class CLIP(L.LightningModule):
             logits_per_text = logits_per_image.t()
 
             # cosine similarity as logits
-            if not self.multi_positive:
+            if self.loss_type == 'siglip':
+                labels = batch['class'] if self.multi_positive else torch.arange(bs, device=image_features.device)
+                loss = self.siglip_loss(logits_per_image, labels, labels)
+                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )
+
+            elif not self.multi_positive:
                 labels = torch.arange(
                     image_features.shape[0],
                     device=image_features.device,
@@ -639,6 +650,21 @@ class CLIP(L.LightningModule):
         return loss
 
 
+    def siglip_loss(self, logits, query_labels, key_labels):
+        """
+        Sigmoid loss (SigLIP, Zhai et al. 2023), every query-key pair is an independent binary classification.
+
+        Pairs with the same label are positives, works for both single and multi positive.
+
+        Args:
+            logits:       [N_query, N_key] scaled cosine similarities, without bias
+            query_labels: [N_query]
+            key_labels:   [N_key]
+        """
+        signs = (query_labels[:, None] == key_labels[None, :]).float() * 2 - 1
+        logits = logits + self.logit_bias
+        return -F.logsigmoid(signs * logits).sum() / logits.shape[0]
+
     def training_step(self, batch, batch_idx):
 
         if self.cooling is not None:
@@ -714,6 +740,21 @@ class CLIP(L.LightningModule):
         
         logits_per_image = logit_scale * query_image_features @ all_text_features.T
         logits_per_text = logit_scale * query_text_features @ all_image_features.T
+
+        if self.loss_type == 'siglip':
+            self.log("sigmoid_bias", self.logit_bias, batch_size=local_bs)
+            if self.multi_positive:
+                query_labels, key_labels = query_class_labels, all_class_labels
+            else:
+                # sample indices in the gathered batch, positives are the matching pairs
+                key_labels = torch.arange(all_image_features.shape[0], device=image_features.device)
+                query_labels = key_labels
+                if self.local_loss and world_size > 1:
+                    query_labels = torch.arange(local_bs, device=image_features.device) + self.trainer.global_rank * local_bs
+
+            loss = (self.siglip_loss(logits_per_image, query_labels, key_labels) + self.siglip_loss(logits_per_text, query_labels, key_labels)) / 2
+            self.log("train_loss", loss, sync_dist=True, batch_size=local_bs, )
+            return loss
 
         if not self.multi_positive:
             if self.local_loss:
