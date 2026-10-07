@@ -9,6 +9,7 @@ from lightning.pytorch import seed_everything
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader, ConcatDataset
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.strategies import DeepSpeedStrategy
 from glob import glob
 from model.createModel import createModel
 import torch.distributed as dist
@@ -236,6 +237,12 @@ if __name__ == '__main__':
     )
 
     callbacks = [checkpoint_callback]
+
+    strategy = args.strategy
+    if strategy == 'deepspeed_stage_2' and conf.model.lora.apply:
+        # deepspeed writes its own shards, so frozen backbone weights must be excluded here
+        strategy = DeepSpeedStrategy(stage=2, exclude_frozen_parameters=True)
+
     trainer = L.Trainer(
         max_epochs=conf.train.epochs,
         devices=args.gpus,
@@ -245,7 +252,7 @@ if __name__ == '__main__':
         use_distributed_sampler=False,
         callbacks=callbacks,
         log_every_n_steps=conf.log_interval,
-        strategy=args.strategy,
+        strategy=strategy,
     )
 
     print('starting training')

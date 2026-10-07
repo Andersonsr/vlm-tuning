@@ -364,6 +364,7 @@ class CLIP(L.LightningModule):
         self.cooling = None
         self.lr = conf.train.learning_rate
         self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
+        self.save_lora_only = bool(conf.model.lora.apply)
 
         if conf.train.cooling.apply:
             self.cooling = conf.train.cooling.apply
@@ -498,6 +499,18 @@ class CLIP(L.LightningModule):
         elif self.lora == 'loratorch':
             loratorch.mark_only_lora_as_trainable(self.model)
             self.model.logit_scale.requires_grad = self.train_temperature
+
+    def lora_state_dict(self, state_dict=None):
+        # keeps only the LoRA weights, any other trainable params (e.g. vision head) and the temperature
+        if state_dict is None:
+            state_dict = self.state_dict()
+        trainable = {name for name, param in self.named_parameters() if param.requires_grad}
+        return {k: v for k, v in state_dict.items() if 'lora_' in k or k in trainable or k.endswith('logit_scale')}
+
+    def on_save_checkpoint(self, checkpoint):
+        if self.save_lora_only and 'state_dict' in checkpoint:
+            checkpoint['state_dict'] = self.lora_state_dict(checkpoint['state_dict'])
+            checkpoint['lora_only'] = True
 
     def on_after_backward(self):
         if self.lora == 'loratorch':
