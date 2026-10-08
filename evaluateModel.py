@@ -121,14 +121,19 @@ def batch_similarities(images, texts, pair_labels, batch_size):
     return torch.cat(positives), torch.cat(negatives)
 
 
-def recall_at_k(queries, keys, query_labels, key_labels, ks, chunk_size=1024):
+def retrieval_at_k(queries, keys, query_labels, key_labels, ks, chunk_size=1024):
     """
-    Recall@k as in torchmetrics RetrievalRecall: positives in the top k / positives of the query, averaged over queries.
+    Recall@k and precision@k as in torchmetrics RetrievalRecall and RetrievalPrecision, averaged over queries:
+        recall: positives in the top k / positives of the query
+        precision: positives in the top k / k
 
     Pairs with the same label are positives, the similarity matrix is computed in chunks of queries to save memory.
+
+    :return: (recall, precision), dicts of k -> value
     """
     max_k = min(max(ks), keys.shape[0])
     hits = {k: 0. for k in ks}
+    precision = {k: 0. for k in ks}
 
     for start in range(0, queries.shape[0], chunk_size):
         q = queries[start:start + chunk_size]
@@ -139,8 +144,10 @@ def recall_at_k(queries, keys, query_labels, key_labels, ks, chunk_size=1024):
 
         for k in ks:
             hits[k] += (retrieved[:, min(k, max_k) - 1] / n_positives).sum().item()
+            precision[k] += (retrieved[:, min(k, max_k) - 1] / k).sum().item()
 
-    return {k: hits[k] / queries.shape[0] for k in ks}
+    n = queries.shape[0]
+    return {k: hits[k] / n for k in ks}, {k: precision[k] / n for k in ks}
 
 
 def plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, title, path, bins):
@@ -246,18 +253,25 @@ def plot_embeddings(images, texts, labels, class_names, method, n_pairs, title, 
     print('  saved at', path)
 
 
-def plot_recall(df, title, path):
+def plot_retrieval(df, metric, title, path):
+    """
+    :param metric: 'recall' or 'precision', column of df
+    """
     fig, ax = plt.subplots(figsize=(6, 4.5))
     for direction, label in [('i2t', 'image to text'), ('t2i', 'text to image')]:
         rows = df[df['direction'] == direction]
-        ax.plot(rows['k'], rows['recall'], marker='o', label=label)
+        ax.plot(rows['k'], rows[metric], marker='o', label=label)
 
     ax.set_xscale('log')
     ax.set_xticks(KS)
     ax.set_xticklabels(KS)
-    ax.set_ylim(0, 1)
+    if metric == 'recall':
+        ax.set_ylim(0, 1)
+    else:
+        # with a single positive per query P@k <= 1/k, a fixed 0-1 range would flatten the curves
+        ax.set_ylim(bottom=0)
     ax.set_xlabel('k')
-    ax.set_ylabel('R@k')
+    ax.set_ylabel('R@k' if metric == 'recall' else 'P@k')
     ax.set_title(title)
     ax.grid(alpha=0.3)
     ax.legend()
@@ -320,19 +334,20 @@ if __name__ == '__main__':
                            os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, suffix)), args.bins)
 
         # retrieval, every sample of the split is in the gallery
-        recalls = {
-            'i2t': recall_at_k(images, texts, pair_labels, pair_labels, KS),
-            't2i': recall_at_k(texts, images, pair_labels, pair_labels, KS),
+        metrics = {
+            'i2t': retrieval_at_k(images, texts, pair_labels, pair_labels, KS),
+            't2i': retrieval_at_k(texts, images, pair_labels, pair_labels, KS),
         }
 
         df = pd.DataFrame([
             {'experiment': experiment, 'split': args.split, 'dataset': name, 'multi_positive': multi_positive,
-             'gallery_size': images.shape[0], 'direction': direction, 'k': k, 'recall': recall}
-            for direction, values in recalls.items() for k, recall in values.items()
+             'gallery_size': images.shape[0], 'direction': direction, 'k': k, 'recall': recall[k], 'precision': precision[k]}
+            for direction, (recall, precision) in metrics.items() for k in KS
         ])
         results.append(df)
-        print(df.pivot(index='k', columns='direction', values='recall').to_string(float_format='{:.4f}'.format))
-        plot_recall(df, title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
+        print(df.pivot(index='k', columns='direction', values=['recall', 'precision']).to_string(float_format='{:.4f}'.format))
+        plot_retrieval(df, 'recall', title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
+        plot_retrieval(df, 'precision', title, os.path.join(output, 'precision_{}_{}{}.png'.format(name, args.split, suffix)))
 
         # both modalities in the same 2D space
         class_names = get_class_names(loader.dataset)
