@@ -150,38 +150,23 @@ def retrieval_at_k(queries, keys, query_labels, key_labels, ks, chunk_size=1024)
     return {k: hits[k] / n for k in ks}, {k: precision[k] / n for k in ks}
 
 
-def plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, title, path, bins):
-    # logits as used by the training loss, the bias is only part of the sigmoid loss
-    pos_logits = logit_scale * positives + (logit_bias if siglip else 0.)
-    neg_logits = logit_scale * negatives + (logit_bias if siglip else 0.)
-
+def plot_distributions(positives, negatives, title, path, bins):
     scores = torch.cat([positives, negatives])
     targets = torch.cat([torch.ones_like(positives), torch.zeros_like(negatives)]).long()
     auc = auroc(scores, targets, task='binary').item()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    panels = [
-        (axes[0], positives, negatives, 'cosine similarity'),
-        (axes[1], pos_logits, neg_logits, 'logit (scale {:.2f}{})'.format(logit_scale, ', bias {:.2f}'.format(logit_bias) if siglip else '')),
-    ]
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    # same bin edges for both, so the densities are comparable
+    edges = torch.linspace(min(positives.min(), negatives.min()).item(), max(positives.max(), negatives.max()).item(), bins + 1).numpy()
+    ax.hist(negatives.numpy(), bins=edges, density=True, alpha=0.6, label='negatives (n={})'.format(len(negatives)), color='tab:red')
+    ax.hist(positives.numpy(), bins=edges, density=True, alpha=0.6, label='positives (n={})'.format(len(positives)), color='tab:blue')
+    ax.axvline(positives.mean().item(), color='tab:blue', linestyle='--', linewidth=1)
+    ax.axvline(negatives.mean().item(), color='tab:red', linestyle='--', linewidth=1)
+    ax.set_xlabel('cosine similarity')
+    ax.set_ylabel('density')
+    ax.legend()
 
-    for ax, pos, neg, xlabel in panels:
-        # same bin edges for both, so the densities are comparable
-        edges = torch.linspace(min(pos.min(), neg.min()).item(), max(pos.max(), neg.max()).item(), bins + 1).numpy()
-        ax.hist(neg.numpy(), bins=edges, density=True, alpha=0.6, label='negatives (n={})'.format(len(neg)), color='tab:red')
-        ax.hist(pos.numpy(), bins=edges, density=True, alpha=0.6, label='positives (n={})'.format(len(pos)), color='tab:blue')
-        ax.axvline(pos.mean().item(), color='tab:blue', linestyle='--', linewidth=1)
-        ax.axvline(neg.mean().item(), color='tab:red', linestyle='--', linewidth=1)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel('density')
-        ax.legend()
-
-    if siglip:
-        # sigmoid(logit) = 0.5, pairs on the right are classified as positives
-        axes[1].axvline(0., color='black', linewidth=1, label='decision boundary')
-        axes[1].legend()
-
-    fig.suptitle('{} (AUC {:.4f})'.format(title, auc))
+    ax.set_title('{} (AUC {:.4f})'.format(title, auc))
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -302,7 +287,6 @@ if __name__ == '__main__':
     conf.model.load_weights = True
     batch_size = args.batch_size if args.batch_size is not None else conf.train.batch_size
     multi_positive = args.multi_positive if args.multi_positive is not None else conf.train.get('multi_positive', False)
-    siglip = conf.train.get('loss', 'contrastive') == 'siglip'
     # logits and retrieval results depend on how positives are defined, keep both versions side by side
     suffix = '_multipositive' if multi_positive else ''
     output = args.output if args.output is not None else conf.output_dir
@@ -312,8 +296,6 @@ if __name__ == '__main__':
     model = createModel(conf).to(device)
     model.eval()
 
-    logit_scale = model.model.logit_scale.exp().item()
-    logit_bias = model.logit_bias.item()
     loaders = build_loaders(conf, model, args.split, batch_size, multi_positive)
     base_title = args.title if args.title is not None else '{} {}'.format(experiment, args.split)
 
@@ -332,7 +314,7 @@ if __name__ == '__main__':
 
         # logits distributions, pairs inside each batch
         positives, negatives = batch_similarities(images, texts, pair_labels, batch_size)
-        plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, metric_title,
+        plot_distributions(positives, negatives, metric_title,
                            os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, suffix)), args.bins)
 
         # retrieval, every sample of the split is in the gallery
