@@ -25,9 +25,6 @@ def build_loaders(conf, model, split, batch_size, multi_positive):
     annotation = conf.dataset.train_annotation if split == 'train' else conf.dataset.val_annotation
     loaders = []
     if conf.dataset.name != 'geo':
-        if multi_positive:
-            raise ValueError('multi positive needs class labels, only available for the geo dataset')
-
         dataset = CaptionDataset(conf.dataset.root, annotation, conf.dataset.name, model.prepareImages, model.tokenize, random=False)
         loaders.append((conf.dataset.name, dataset.get_loader(batch_size, True)))
 
@@ -69,11 +66,41 @@ def collect_features(model, loader, device, max_batches=None):
         images.append((image_features / image_features.norm(dim=-1, keepdim=True)).float())
         texts.append((text_features / text_features.norm(dim=-1, keepdim=True)).float())
         if 'class' in batch:
+            # geo dataset
             labels.append(batch['class'])
+        elif 'labels' in batch and torch.is_tensor(batch['labels']):
+            # caption datasets with classes (nwpu), index from labels.json
+            labels.append(batch['labels'])
         print('batch {}: {} samples'.format(i, image_features.shape[0]))
 
     labels = torch.cat(labels).to(device) if len(labels) > 0 else None
     return torch.cat(images), torch.cat(texts), labels
+
+
+def get_class_names(dataset):
+    """
+    :return: class names ordered by class index, or None when the dataset has no classes
+    """
+    categories = getattr(dataset, 'categories', None)
+    if categories is not None and len(categories) > 0:
+        # geo dataset, pandas index from factorize
+        return list(categories)
+
+    labels = getattr(dataset, 'labels', None)
+    if isinstance(labels, dict):
+        # caption datasets, labels.json maps name -> index
+        return sorted(labels, key=labels.get)
+
+    return None
+
+
+def class_colors(n_classes):
+    # enough distinct colors for nwpu (45 classes), cycles after 60
+    if n_classes <= 10:
+        return list(plt.get_cmap('tab10').colors)
+    if n_classes <= 20:
+        return list(plt.get_cmap('tab20').colors)
+    return list(plt.get_cmap('tab20').colors) + list(plt.get_cmap('tab20b').colors) + list(plt.get_cmap('tab20c').colors)
 
 
 def batch_similarities(images, texts, pair_labels, batch_size):
@@ -182,14 +209,15 @@ def plot_embeddings(images, texts, labels, class_names, method, n_pairs, title, 
 
     image_points, text_points = points[:n], points[n:]
 
-    fig, ax = plt.subplots(figsize=(8, 7))
+    # wider figure for the two column legend of datasets with many classes
+    fig, ax = plt.subplots(figsize=(11 if labels is not None and int(labels.max()) >= 22 else 8, 7))
     # positive pairs
     ax.add_collection(LineCollection(list(zip(image_points, text_points)), colors='gray', linewidths=0.5, alpha=0.4, zorder=1))
 
     if labels is not None:
         classes = labels[idx].cpu()
-        cmap = plt.get_cmap('tab20' if len(class_names or []) > 10 or classes.max() >= 10 else 'tab10')
-        colors = [cmap(c % cmap.N) for c in classes.tolist()]
+        palette = class_colors(len(class_names) if class_names is not None else int(labels.max()) + 1)
+        colors = [palette[c % len(palette)] for c in classes.tolist()]
         image_colors, text_colors = colors, colors
     else:
         image_colors, text_colors = 'tab:blue', 'tab:orange'
@@ -205,9 +233,10 @@ def plot_embeddings(images, texts, labels, class_names, method, n_pairs, title, 
     if labels is not None:
         for c in sorted(set(classes.tolist())):
             name = class_names[c] if class_names is not None else 'class {}'.format(c)
-            handles.append(Line2D([], [], marker='s', linestyle='', color=cmap(c % cmap.N), label=name))
+            handles.append(Line2D([], [], marker='s', linestyle='', color=palette[c % len(palette)], label=name))
 
-    ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=8)
+    # long legends (nwpu has 45 classes) are split in columns
+    ax.legend(handles=handles, loc='upper left', bbox_to_anchor=(1.01, 1), fontsize=7 if len(handles) > 25 else 8, ncol=1 if len(handles) <= 25 else 2)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title('{} ({} pairs, {})'.format(title, n, method.upper() if method == 'pca' else 't-SNE'))
@@ -275,6 +304,8 @@ if __name__ == '__main__':
     results = []
     for name, loader in loaders:
         images, texts, labels = collect_features(model, loader, device, args.max_batches)
+        if multi_positive and labels is None:
+            raise ValueError('multi positive needs class labels, {} has none'.format(name))
         # without multi positive only the paired sample is a positive
         pair_labels = labels if multi_positive else torch.arange(images.shape[0], device=device)
         # with several geo indices, the dataset name tells the plots apart
@@ -302,8 +333,7 @@ if __name__ == '__main__':
         plot_recall(df, title, os.path.join(output, 'retrieval_{}_{}.png'.format(name, args.split)))
 
         # both modalities in the same 2D space
-        class_names = getattr(loader.dataset, 'categories', None)
-        class_names = list(class_names) if class_names is not None and len(class_names) > 0 else None
+        class_names = get_class_names(loader.dataset)
         plot_embeddings(images, texts, labels, class_names, args.reduction, args.n_pairs, title,
                         os.path.join(output, 'embeddings_{}_{}_{}.png'.format(args.reduction, name, args.split)))
 
