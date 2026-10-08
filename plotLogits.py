@@ -87,36 +87,11 @@ def plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, ti
     print('  saved at', path)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Plots the distributions of the logits of positive and negative image-text pairs of a trained model')
-    parser.add_argument('--config', type=str, required=True, help='config.yaml saved in the experiment dir by trainLight.py')
-    parser.add_argument('--split', choices=['train', 'val'], default='val')
-    parser.add_argument('--batch_size', type=int, default=None, help='pairs are compared inside each batch, defaults to the training batch size')
-    parser.add_argument('--max_batches', type=int, default=None, help='limit the number of batches used')
-    parser.add_argument('--multi_positive', action='store_true', default=None, help='pairs with the same class are positives, defaults to the training setting')
-    parser.add_argument('--bins', type=int, default=100)
-    parser.add_argument('--output', type=str, default=None, help='output dir, defaults to the experiment dir')
-    args = parser.parse_args()
-
-    seed_everything(777, workers=True)
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-
-    conf = OmegaConf.load(args.config)
-    conf.model.load_weights = True
-    batch_size = args.batch_size if args.batch_size is not None else conf.train.batch_size
-    multi_positive = args.multi_positive if args.multi_positive is not None else conf.train.get('multi_positive', False)
-    siglip = conf.train.get('loss', 'contrastive') == 'siglip'
-    output = args.output if args.output is not None else conf.output_dir
-    os.makedirs(output, exist_ok=True)
-
-    model = createModel(conf).to(device)
-    model.eval()
-
-    logit_scale = model.model.logit_scale.exp().item()
-    logit_bias = model.logit_bias.item()
-    annotation = conf.dataset.train_annotation if args.split == 'train' else conf.dataset.val_annotation
-
-    # (title, loader) for each evaluated dataset
+def build_loaders(conf, model, split, batch_size, multi_positive):
+    """
+    :return: list of (dataset name, loader), one for each geo index in geo_index_val or a single one for caption datasets
+    """
+    annotation = conf.dataset.train_annotation if split == 'train' else conf.dataset.val_annotation
     loaders = []
     if conf.dataset.name != 'geo':
         if multi_positive:
@@ -141,9 +116,49 @@ if __name__ == '__main__':
                 )
             loaders.append((GEO_INDICES[idx], dataset.get_loader(batch_size, True)))
 
+    return loaders
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Plots the distributions of the logits of positive and negative image-text pairs of a trained model')
+    parser.add_argument('--config', type=str, required=True, help='config.yaml saved in the experiment dir by trainLight.py')
+    parser.add_argument('--split', choices=['train', 'val'], default='val')
+    parser.add_argument('--batch_size', type=int, default=None, help='pairs are compared inside each batch, defaults to the training batch size')
+    parser.add_argument('--max_batches', type=int, default=None, help='limit the number of batches used')
+    parser.add_argument('--multi_positive', action='store_true', default=None, help='pairs with the same class are positives, defaults to the training setting')
+    parser.add_argument('--bins', type=int, default=100)
+    parser.add_argument('--title', type=str, default=None, help='plot title, defaults to the experiment dir name and split')
+    parser.add_argument('--output', type=str, default=None, help='output dir, defaults to the experiment dir')
+    args = parser.parse_args()
+
+    seed_everything(777, workers=True)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    conf = OmegaConf.load(args.config)
+    conf.model.load_weights = True
+    batch_size = args.batch_size if args.batch_size is not None else conf.train.batch_size
+    multi_positive = args.multi_positive if args.multi_positive is not None else conf.train.get('multi_positive', False)
+    siglip = conf.train.get('loss', 'contrastive') == 'siglip'
+    output = args.output if args.output is not None else conf.output_dir
+    os.makedirs(output, exist_ok=True)
+
+    model = createModel(conf).to(device)
+    model.eval()
+
+    logit_scale = model.model.logit_scale.exp().item()
+    logit_bias = model.logit_bias.item()
+
+    loaders = build_loaders(conf, model, args.split, batch_size, multi_positive)
+
+    if args.title is not None:
+        base_title = args.title
+    else:
+        base_title = '{} {}'.format(os.path.basename(os.path.normpath(conf.output_dir)), args.split)
+
     for name, loader in loaders:
         positives, negatives = collect_logits(model, loader, device, multi_positive, args.max_batches)
-        title = '{} {} batch {}{}'.format(name, args.split, batch_size, ' multi positive' if multi_positive else '')
+        # with several geo indices, the dataset name tells the plots apart
+        title = base_title if len(loaders) == 1 else '{} {}'.format(base_title, name)
         path = os.path.join(output, 'logits_{}_{}.png'.format(name, args.split))
         plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, title, path, args.bins)
 
