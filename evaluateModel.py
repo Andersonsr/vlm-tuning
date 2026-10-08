@@ -289,6 +289,8 @@ if __name__ == '__main__':
     batch_size = args.batch_size if args.batch_size is not None else conf.train.batch_size
     multi_positive = args.multi_positive if args.multi_positive is not None else conf.train.get('multi_positive', False)
     siglip = conf.train.get('loss', 'contrastive') == 'siglip'
+    # logits and retrieval results depend on how positives are defined, keep both versions side by side
+    suffix = '_multipositive' if multi_positive else ''
     output = args.output if args.output is not None else conf.output_dir
     experiment = os.path.basename(os.path.normpath(conf.output_dir))
     os.makedirs(output, exist_ok=True)
@@ -315,7 +317,7 @@ if __name__ == '__main__':
         # logits distributions, pairs inside each batch
         positives, negatives = batch_similarities(images, texts, pair_labels, batch_size)
         plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, title,
-                           os.path.join(output, 'logits_{}_{}.png'.format(name, args.split)), args.bins)
+                           os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, suffix)), args.bins)
 
         # retrieval, every sample of the split is in the gallery
         recalls = {
@@ -330,14 +332,14 @@ if __name__ == '__main__':
         ])
         results.append(df)
         print(df.pivot(index='k', columns='direction', values='recall').to_string(float_format='{:.4f}'.format))
-        plot_recall(df, title, os.path.join(output, 'retrieval_{}_{}.png'.format(name, args.split)))
+        plot_recall(df, title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
 
         # both modalities in the same 2D space
         class_names = get_class_names(loader.dataset)
         plot_embeddings(images, texts, labels, class_names, args.reduction, args.n_pairs, title,
                         os.path.join(output, 'embeddings_{}_{}_{}.png'.format(args.reduction, name, args.split)))
 
-    csv_path = os.path.join(output, 'retrieval_{}.csv'.format(args.split))
+    csv_path = os.path.join(output, 'retrieval_{}{}.csv'.format(args.split, suffix))
     pd.concat(results).to_csv(csv_path, index=False)
     print('metrics saved at', csv_path)
 
