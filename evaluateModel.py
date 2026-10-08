@@ -326,11 +326,13 @@ if __name__ == '__main__':
         pair_labels = labels if multi_positive else torch.arange(images.shape[0], device=device)
         # with several geo indices, the dataset name tells the plots apart
         title = base_title if len(loaders) == 1 else '{} {}'.format(base_title, name)
-        print(title)
+        # the embeddings plot does not depend on how positives are defined, so only the other plots are marked
+        metric_title = '{} multipositive'.format(title) if multi_positive else title
+        print(metric_title)
 
         # logits distributions, pairs inside each batch
         positives, negatives = batch_similarities(images, texts, pair_labels, batch_size)
-        plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, title,
+        plot_distributions(positives, negatives, logit_scale, logit_bias, siglip, metric_title,
                            os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, suffix)), args.bins)
 
         # retrieval, every sample of the split is in the gallery
@@ -346,8 +348,8 @@ if __name__ == '__main__':
         ])
         results.append(df)
         print(df.pivot(index='k', columns='direction', values=['recall', 'precision']).to_string(float_format='{:.4f}'.format))
-        plot_retrieval(df, 'recall', title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
-        plot_retrieval(df, 'precision', title, os.path.join(output, 'precision_{}_{}{}.png'.format(name, args.split, suffix)))
+        plot_retrieval(df, 'recall', metric_title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
+        plot_retrieval(df, 'precision', metric_title, os.path.join(output, 'precision_{}_{}{}.png'.format(name, args.split, suffix)))
 
         # both modalities in the same 2D space
         class_names = get_class_names(loader.dataset)
