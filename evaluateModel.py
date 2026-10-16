@@ -13,6 +13,7 @@ from lightning.pytorch import seed_everything
 from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES
 from model.encoders import crop_transform
 from model.createModel import createModel
+from model.dual_encoder import pairwise_similarity, pool_queries
 
 
 KS = [1, 5, 10, 20, 50, 100]
@@ -112,7 +113,7 @@ def batch_similarities(images, texts, pair_labels, batch_size):
     positives, negatives = [], []
 
     for start in range(0, images.shape[0], batch_size):
-        cosine = images[start:start + batch_size] @ texts[start:start + batch_size].T
+        cosine = pairwise_similarity(images[start:start + batch_size], texts[start:start + batch_size])
         labels = pair_labels[start:start + batch_size]
         positive_mask = labels[:, None] == labels[None, :]
         positives.append(cosine[positive_mask].cpu())
@@ -138,7 +139,9 @@ def retrieval_at_k(queries, keys, query_labels, key_labels, ks, chunk_size=1024)
     for start in range(0, queries.shape[0], chunk_size):
         q = queries[start:start + chunk_size]
         positive = query_labels[start:start + chunk_size, None] == key_labels[None, :]
-        top = (q @ keys.T).topk(max_k, dim=-1).indices
+        # image features may be [n, k, d] (DualEncoder 'max' pooling), on either side
+        sims = pairwise_similarity(keys, q).T if keys.dim() == 3 else pairwise_similarity(q, keys)
+        top = sims.topk(max_k, dim=-1).indices
         retrieved = positive.gather(1, top).float().cumsum(dim=-1)
         n_positives = positive.sum(dim=-1).clamp(min=1)
 
@@ -185,6 +188,7 @@ def plot_embeddings(images, texts, labels, class_names, method, n_pairs, title, 
     :param method: 'pca' (fitted on all samples, then applied to the plotted ones) or 'tsne' (only the plotted ones)
     :param n_pairs: number of image-text pairs plotted, sampled at random
     """
+    images = pool_queries(images)  # one point per image with 'max' pooling (mean of its query outputs)
     generator = torch.Generator().manual_seed(777)
     idx = torch.randperm(images.shape[0], generator=generator)[:n_pairs].to(images.device)
     n = idx.shape[0]

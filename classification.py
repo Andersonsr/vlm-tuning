@@ -2,6 +2,7 @@ from omegaconf import OmegaConf
 from dataset.datasets import CaptionDataset
 import torch
 from model.createModel import createModel
+from model.dual_encoder import pairwise_similarity
 from torch.optim import AdamW
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import argparse
@@ -46,7 +47,7 @@ def evaluate_zs_nwpu(model_config, ):
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
     
         logit_scale = model.model.logit_scale.exp()
-        logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+        logits_per_image = logit_scale.to(image_features.device) * pairwise_similarity(image_features, text_features)
     
     pred = logits_per_image.argmax(dim=1)
     result = {

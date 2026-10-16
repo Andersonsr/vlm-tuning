@@ -4,7 +4,6 @@ import clip
 import os
 from PIL import Image, ImageFile
 import lightning as L
-from torchmetrics.retrieval import RetrievalRecall
 from torch.optim import AdamW, Adam
 import loratorch 
 from model.lora_utils import mark_only_lora_as_trainable
@@ -13,7 +12,7 @@ from LongCLIP.model import longclip
 from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers, apply_lora
 from loratorch_utils import apply_lora_attn_mlp
 from model.GeoRSCLIPpreprocess import get_preprocess
-from model.dual_encoder import DualEncoder, TextTokenizer, load_ssl_backbone
+from model.dual_encoder import DualEncoder, TextTokenizer, load_ssl_backbone, pairwise_similarity, pool_queries
 import torch, open_clip
 from peft import LoraConfig, get_peft_model
 from adapter import ResidualProjection
@@ -321,6 +320,17 @@ def get_model(conf):
     
     return model, preprocess, tokenize
 
+def recall_at_k(scores, targets, k):
+    """Recall@k averaged over the queries (rows): positives in the top k / positives of the query, queries without
+    positives skipped. Same as evaluateModel.retrieval_at_k; torchmetrics' RetrievalRecall is not used because it only
+    counts positives with a score above 0, which misses matches with a negative cosine similarity."""
+    top = scores.topk(min(k, scores.shape[1]), dim=1).indices
+    hits = targets.gather(1, top).sum(1)
+    positives = targets.sum(1)
+    valid = positives > 0
+    return (hits[valid] / positives[valid]).mean()
+
+
 class ExtraWrap(torch.nn.Module):
     # this is used to have all models with the same module names as CLIP 
     def __init__(self, model):
@@ -458,6 +468,8 @@ class CLIP(L.LightningModule):
         train_bias = conf.model.train_bias if hasattr(conf.model, 'train_bias') else False
         self.logit_bias = torch.nn.Parameter(torch.ones(1) * sigmoid_bias, requires_grad=train_bias)
 
+        # checkpoints without the frozen weights (save_lora_only) can only be resumed with a non-strict load
+        self.strict_loading = not self.save_lora_only
         self.save_hyperparameters(conf) 
 
 
@@ -540,6 +552,13 @@ class CLIP(L.LightningModule):
         if self.save_lora_only and 'state_dict' in checkpoint:
             checkpoint['state_dict'] = self.lora_state_dict(checkpoint['state_dict'])
             checkpoint['lora_only'] = True
+        if self.cooling is not None:
+            checkpoint['cooling_step'] = self.step
+
+    def on_load_checkpoint(self, checkpoint):
+        # resuming (trainLight --resume): continue the temperature schedule where it stopped
+        if self.cooling is not None and 'cooling_step' in checkpoint:
+            self.step = checkpoint['cooling_step']
 
     def on_after_backward(self):
         if self.lora == 'loratorch':
@@ -571,16 +590,18 @@ class CLIP(L.LightningModule):
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             
             bs = text_features.shape[0]
-            image_centroid = image_features.mean(dim=0)
+            # one vector per image for the distances (DualEncoder 'max' pooling gives [n, k, d], one per query)
+            pooled_image = pool_queries(image_features)
+            image_centroid = pooled_image.mean(dim=0)
             texts_centroid = text_features.mean(dim=0)
 
             centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
-            pairwise_distance = torch.diagonal(torch.cdist(image_features, text_features, p=2)).mean()
+            pairwise_distance = torch.diagonal(torch.cdist(pooled_image, text_features, p=2)).mean()
             self.log(f'{dataset}centroid distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
             self.log(f'{dataset}pairwise distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
 
             logit_scale = self.model.logit_scale.exp()
-            logits_per_image = logit_scale.to(image_features.device) * image_features @ text_features.t()
+            logits_per_image = logit_scale.to(image_features.device) * pairwise_similarity(image_features, text_features)
             logits_per_text = logits_per_image.t()
 
             # cosine similarity as logits
@@ -629,20 +650,10 @@ class CLIP(L.LightningModule):
                 ).float().to(logits_per_image.device)
                                 
 
-            n, m = logits_per_image.shape
-            indexes = torch.repeat_interleave(
-                torch.arange(n), 
-                repeats=m
-            ).to(logits_per_image.device)
-
-            logits_per_image = logits_per_image.flatten()
-            logits_per_text = logits_per_text.flatten()
-            targets = targets.flatten()
-
+            # images as queries, and texts as queries (transposed matrices), measured separately
             for k in [1, 5, 10]:
-                rk = RetrievalRecall(top_k=k)
-                self.log(f'{dataset}i2t r@{k}', rk(logits_per_image, targets, indexes), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
-                self.log(f'{dataset}t2i r@{k}', rk(logits_per_image.T, targets, indexes), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+                self.log(f'{dataset}i2t r@{k}', recall_at_k(logits_per_image, targets, k), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+                self.log(f'{dataset}t2i r@{k}', recall_at_k(logits_per_text, targets.T, k), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
 
     def multi_positive_loss(self, logits, query_labels, key_labels):
         """
@@ -730,9 +741,9 @@ class CLIP(L.LightningModule):
                 gathered_text_features[self.trainer.global_rank] = text_features
                 # print('inserted features requires grad', gathered_image_features[self.trainer.global_rank].requires_grad)
             
-            dim = image_features.shape[-1]
-            all_image_features = gathered_image_features.reshape(-1, dim)
-            all_text_features = gathered_text_features.reshape(-1, dim)
+            # [world, b, ...] -> [world * b, ...], image features may be [b, k, d] (one per query)
+            all_image_features = gathered_image_features.reshape(-1, *image_features.shape[1:])
+            all_text_features = gathered_text_features.reshape(-1, *text_features.shape[1:])
 
             if self.multi_positive:
                 all_class_labels = gathered_class_labels.reshape(-1)
@@ -760,8 +771,8 @@ class CLIP(L.LightningModule):
         logit_scale = self.model.logit_scale.exp()
         self.log("temperature", logit_scale, batch_size=local_bs)
         
-        logits_per_image = logit_scale * query_image_features @ all_text_features.T
-        logits_per_text = logit_scale * query_text_features @ all_image_features.T
+        logits_per_image = logit_scale * pairwise_similarity(query_image_features, all_text_features)
+        logits_per_text = logit_scale * pairwise_similarity(all_image_features, query_text_features).T
 
         if self.loss_type == 'siglip':
             self.log("sigmoid_bias", self.logit_bias, batch_size=local_bs)

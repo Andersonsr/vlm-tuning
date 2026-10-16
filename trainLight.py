@@ -1,6 +1,8 @@
 from omegaconf import OmegaConf
 import argparse
+import inspect
 import os
+import re
 from collections import defaultdict
 from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES, DistributedSingleDatasetBatchSampler
 from model.encoders import resize_transform, crop_transform
@@ -13,6 +15,26 @@ from lightning.pytorch.strategies import DeepSpeedStrategy
 from glob import glob
 from model.createModel import createModel
 import torch.distributed as dist
+
+
+def newest_checkpoint(folder):
+    """Most recent of the checkpoints a run leaves in its folder: hpc_ckpt_<n>.ckpt (saved by lightning when slurm
+    sends the requeue signal) and last.ckpt (end of every epoch); None if there is none. On rank 0, older hpc
+    checkpoints are removed, they are superseded."""
+    candidates = []
+    for path in glob(os.path.join(folder, 'hpc_ckpt_*.ckpt')) + [os.path.join(folder, 'last.ckpt')]:
+        try:
+            candidates.append((os.path.getmtime(path), path))
+        except OSError:  # missing (or just removed by rank 0)
+            pass
+    if not candidates:
+        return None
+    newest = max(candidates)[1]
+    if os.environ.get('SLURM_PROCID', os.environ.get('RANK', '0')) == '0':
+        for _, path in candidates:
+            if path != newest and os.path.basename(path).startswith('hpc_ckpt_') and os.path.isfile(path):
+                os.remove(path)
+    return newest
 
 
 if __name__ == '__main__':
@@ -40,6 +62,9 @@ if __name__ == '__main__':
     parser.add_argument('--spectral_aug', action='store_true', default=None, help='enable spectral augmentation (equalization, contrast, sharpen, dichromacy, color cast, vignette, brightness) in training')
     parser.add_argument('--p_spectral', type=float, default=None, help='probability of applying one of the spectral augmentations, used to overwrite config p_spectral')
     parser.add_argument('--nlm_aug', action='store_true', default=None, help='enable NLM denoising augmentation in training (slow, needs opencv)')
+    parser.add_argument('--resume', type=str, default=None, help="resume training from a lightning checkpoint: a path, or 'last' for <output_dir>/<name>/last.ckpt (same --name and options as the interrupted run)")
+    parser.add_argument('--wandb_id', type=str, default=None, help='id of the wandb run to continue when resuming (shown in the run URL); a new run is created otherwise')
+    parser.add_argument('--requeue', action='store_true', default=False, help='for (re)queued slurm jobs: resume from the newest checkpoint of the run (hpc_ckpt_*.ckpt saved on the requeue signal, or last.ckpt) if there is one, else start from scratch, and continue the same wandb run (id from the slurm job id)')
     parser.add_argument('--set', nargs='+', default=[], metavar='KEY=VALUE', help='overwrite any config entry, e.g. --set model.aligner.vision=mlp model.lora.apply=true')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
@@ -249,7 +274,11 @@ if __name__ == '__main__':
     print('model path ', os.path.join(conf.output_dir))
     print(model)
     
-    wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name)
+    wandb_kwargs = {'id': args.wandb_id, 'resume': 'must'} if args.wandb_id else {}
+    if args.requeue and not args.wandb_id and 'SLURM_JOB_ID' in os.environ:
+        # a requeued job keeps its slurm job id, so its restarts log to the same wandb run
+        wandb_kwargs = {'id': re.sub(r'[^A-Za-z0-9_-]', '-', f"{args.name}-{os.environ['SLURM_JOB_ID']}"), 'resume': 'allow'}
+    wandb_logger = WandbLogger(project="VLM-finetuning", name=args.name, **wandb_kwargs)
     print(f'monitoring metric: {conf.train.monitor}')
     checkpoint_callback = ModelCheckpoint(
         monitor=conf.train.monitor,  # Quantity to monitor (e.g., "val_loss", "val_acc")
@@ -277,8 +306,22 @@ if __name__ == '__main__':
         callbacks=callbacks,
         log_every_n_steps=conf.log_interval,
         strategy=strategy,
+        default_root_dir=conf.output_dir,  # where the slurm requeue signal handler saves hpc_ckpt_*.ckpt
     )
 
     print('starting training')
-    trainer.fit(model, train_loader, val_loader,)
+    ckpt_path = args.resume
+    if ckpt_path == 'last':
+        ckpt_path = os.path.join(conf.output_dir, 'last.ckpt')
+    elif ckpt_path is None and args.requeue:
+        ckpt_path = newest_checkpoint(conf.output_dir)
+        if ckpt_path is None:
+            print('--requeue: no checkpoint in', conf.output_dir, 'yet, starting from scratch')
+    if ckpt_path is not None:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f'--resume: {ckpt_path} not found')
+        print('resuming from', ckpt_path)
+    # the checkpoints hold the omegaconf config (hyperparameters), which torch's weights_only loading rejects
+    fit_kwargs = {'weights_only': False} if ckpt_path and 'weights_only' in inspect.signature(trainer.fit).parameters else {}
+    trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path, **fit_kwargs)
     trainer.save_checkpoint(os.path.join(conf.output_dir, 'manual_save.ckpt'))

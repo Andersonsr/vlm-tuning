@@ -10,6 +10,8 @@ conf.model (see configs/dual_default.yaml):
     aligner.vision            'qformer', 'mlp' or 'linear'
     aligner.text              'linear', 'mlp' or 'none' (text embedding used as is: locked text space, LiT)
     aligner.embed_dim         shared space dimension (= text hidden size when aligner.text is 'none')
+    aligner.pooling           qformer outputs: 'mean', 'first' query, or 'max' (BLIP-2 ITC: every query output is kept,
+                              the image-text similarity is the highest one over the queries, see pairwise_similarity)
     lora.apply/encoder        LoRA on 'vision' (qkv), 'text' (lora.text_targets) or 'both' towers
 Towers without LoRA are frozen, run without gradients and stay in eval mode (no dropout) during training.
 """
@@ -17,6 +19,27 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 from transformers import AutoModel, AutoTokenizer
+
+
+def pairwise_similarity(image, text):
+    """Image-text similarities [n, m] of image features [n, d], or [n, k, d] (k query outputs per image, pooling 'max'),
+    and text features [m, d], normalised beforehand. With k queries the similarity of a pair is the highest over the
+    queries (BLIP-2 image-text contrastive), so each text is matched by the query closest to it."""
+    if image.dim() == 2:
+        return image @ text.T
+    sims = image[:, 0] @ text.T
+    for k in range(1, image.shape[1]):  # one query at a time: [n, m] memory instead of [n, m, k]
+        sims = torch.maximum(sims, image[:, k] @ text.T)
+    return sims
+
+
+def pool_queries(image):
+    """One normalised vector per image, for plots and distances: the mean of the query outputs of 'max' pooling
+    features [n, k, d]; [n, d] features are returned as they are."""
+    if image.dim() == 2:
+        return image
+    pooled = image.mean(1)
+    return pooled / pooled.norm(dim=-1, keepdim=True)
 
 
 def load_ssl_backbone(backbone, path, branch='teacher'):
@@ -61,12 +84,13 @@ class QFormerBlock(nn.Module):
 
 class QFormer(nn.Module):
     """Q-Former-like pooling (BLIP-2, without the text branch): k learned queries read the visual tokens (b x n x
-    input_dim) by cross-attention; the query outputs are pooled ('mean' or 'first') and projected to output_dim."""
+    input_dim) by cross-attention; the query outputs are pooled ('mean' or 'first') and projected to output_dim, or
+    with 'max' all k are projected and returned (b x k x output_dim), to be compared with the text one by one."""
 
     def __init__(self, input_dim, output_dim, k=32, layers=2, dim=768, heads=12, dropout=0.0, pooling='mean'):
         super().__init__()
-        if pooling not in ('mean', 'first'):
-            raise ValueError(f'unknown qformer pooling {pooling} (mean, first)')
+        if pooling not in ('mean', 'first', 'max'):
+            raise ValueError(f'unknown qformer pooling {pooling} (mean, first, max)')
         self.pooling = pooling
         self.visual_norm = nn.LayerNorm(input_dim)
         self.visual_proj = nn.Linear(input_dim, dim) if input_dim != dim else nn.Identity()
@@ -81,6 +105,8 @@ class QFormer(nn.Module):
         for block in self.blocks:
             queries = block(queries, visual)
         queries = self.norm(queries)
+        if self.pooling == 'max':
+            return self.proj(queries)
         return self.proj(queries.mean(1) if self.pooling == 'mean' else queries[:, 0])
 
 

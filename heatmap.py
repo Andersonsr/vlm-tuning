@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 from lightning.pytorch.callbacks import ModelCheckpoint
 from glob import glob
 from model.createModel import createModel
+from model.dual_encoder import pairwise_similarity
 import pandas as pd    
 import torch.distributed as dist
 
@@ -118,7 +119,7 @@ if __name__ == '__main__':
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)            
 
-                logits_per_image = logit_scale * image_features @ text_features.T
+                logits_per_image = logit_scale * pairwise_similarity(image_features, text_features)
 
                 # PLOT logits
                 plt.figure(figsize=(6, 5))

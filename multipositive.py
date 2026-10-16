@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 from lightning.pytorch.callbacks import ModelCheckpoint
 from glob import glob
 from model.createModel import createModel
+from model.dual_encoder import pairwise_similarity, pool_queries
 import pandas as pd
 import seaborn as sns
 from sklearn.decomposition import PCA
@@ -125,10 +126,10 @@ if __name__ == '__main__':
         with torch.no_grad():
             image_features = model.model.encode_image(batch['image'].to(device))
             text_features = model.model.encode_text(batch['tokens'].to(device))
-            features = torch.cat((image_features, text_features))
+            features = torch.cat((pool_queries(image_features), text_features))
             features = features.cpu().numpy()
 
-        logits = 100 * image_features @ text_features.t()
+        logits = 100 * pairwise_similarity(image_features, text_features)
     
         plt.figure(figsize=(6, 5))
         plt.imshow(logits.softmax(dim=-1).cpu().numpy(), cmap='viridis', interpolation='nearest')

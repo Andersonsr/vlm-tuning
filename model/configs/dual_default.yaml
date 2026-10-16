@@ -27,7 +27,8 @@ model:
     width: 768
     heads: 12
     dropout: 0.1
-    pooling: mean  # qformer outputs pooled by 'mean' or taken from the 'first' query
+    pooling: mean  # qformer outputs pooled by 'mean', taken from the 'first' query, or 'max': BLIP-2, the query with the
+                   # highest similarity to the text gives the image-text score
   lora:
     apply: false  # towers are frozen unless LoRA is applied to them
     lib: 'peft'
