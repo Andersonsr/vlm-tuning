@@ -1,0 +1,81 @@
+model:
+  name: DualEncoder:ssl-e5large  # DINOv3 SSL vision backbone + HF text encoder, see model/dual_encoder.py
+  temperature: 100.0
+  image_size: 224
+  vision_head_only: false
+  average_local: false
+  vision:
+    repo: facebookresearch/dinov3  # torch hub repo of the backbone (or a local clone with source: local)
+    source: github
+    arch: dinov3_vitl16  # built without pretrained weights, then loaded from weights
+    weights: null  # required: DINOv3 SSL checkpoint ('<branch>.backbone.' keys under 'model')
+    branch: teacher  # teacher (EMA) or student weights of the checkpoint
+    tokens: cls+patch  # qformer input: 'patch' or 'cls+patch'
+    pooled: cls  # mlp/linear input: 'cls' or 'cls+mean' (CLS concatenated with the mean patch token)
+  text:
+    model_id: intfloat/multilingual-e5-large
+    pooling: mean  # mean, cls or last (e5: mean)
+    prefix: 'query: '  # e5 expects 'query: ' or 'passage: '
+    max_length: 512
+    grad_checkpointing: false  # saves memory when LoRA trains the text tower
+  aligner:
+    vision: qformer  # qformer, mlp or linear
+    text: linear  # linear, mlp or none (text embedding kept as is, LiT: embed_dim must be the text dim, 1024)
+    embed_dim: 1024  # shared embedding dimension
+    queries: 32  # qformer only
+    layers: 2
+    width: 768
+    heads: 12
+    dropout: 0.1
+    pooling: mean  # qformer outputs pooled by 'mean' or taken from the 'first' query
+  lora:
+    apply: false  # towers are frozen unless LoRA is applied to them
+    lib: 'peft'
+    r: 12
+    alpha: 24
+    dropout_rate: 0.25
+    encoder: 'text'  # both, vision, text
+    vision_targets: ['qkv']
+    text_targets: ['query', 'key', 'value']  # XLM-RoBERTa (e5, bge-m3) attention names
+    params: ['q', 'k', 'v', 'o']
+    position: 'all'
+  residual_adapter:
+    apply: false
+    target: 'both'
+    alpha: 0.5
+    bottleneck_reduction: 4
+  calibrate: false
+  load_weights: false
+  train_temperature: false
+  sigmoid_bias: -10
+  train_bias: false
+train:
+  loss: 'contrastive'  # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
+  batch_size: 192  # * n_gpus
+  gpus: 1
+  epochs: 200
+  local_loss: false
+  learning_rate: 0.0005
+  monitor: 'val_loss'
+  multi_positive: false
+  cooling:
+    apply: cosine  # 'step', 'linear', 'cosine' or false
+    final_temp: 30.0
+    iterations: 1.0
+dataset:
+  name: 'geo'
+  root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'
+  train_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/train.csv'
+  val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
+  test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv'
+  random: true
+  geometric_aug: false
+  spectral_aug: false
+  p_spectral: 0.8
+  nlm_aug: false
+  geo_index: [1]  # {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+  geo_index_val: [1]
+  geo_group: [2, 3]
+  resolutions: [256, 512]
+output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+log_interval: 6

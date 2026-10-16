@@ -42,7 +42,14 @@ def createModel(conf,):
         state_dict = read_state_dict(path)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
-        if conf.model.lora.apply:
+        if conf.model.name.split(':')[0] == 'DualEncoder':
+            # only the trainable weights (heads, LoRA adapters) are saved, the towers come from their pretrained weights
+            trainable = {n for n, p in model.named_parameters() if p.requires_grad}
+            missing_trainable = [k for k in missing if k in trainable]
+            if len(missing_trainable) > 0:
+                raise RuntimeError('{} trainable weights missing from {}, e.g. {}'.format(len(missing_trainable), path, missing_trainable[:5]))
+            print('loaded {} tensors (heads and adapters)'.format(len(state_dict) - len(unexpected)))
+        elif conf.model.lora.apply:
             # only the adapters are saved, the backbone comes from the pretrained weights
             missing_lora = [k for k in missing if 'lora_' in k]
             if len(missing_lora) > 0:

@@ -4,6 +4,8 @@ model:
   image_size: 224
   vision_head_only: false
   average_local: false
+  backbone_weights: null # DINOtxt only: DINOv3 SSL checkpoint whose backbone replaces DINO-TXT's (null: DINO-TXT's own)
+  backbone_branch: teacher # teacher (EMA, used by DINOv3's evaluation) or student weights of backbone_weights
   lora:
     apply: true
     lib: 'peft' # loratorch, cliplora, peft

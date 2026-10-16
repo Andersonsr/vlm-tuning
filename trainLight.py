@@ -33,13 +33,18 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=None, help='use to overwrite config batch size')
     parser.add_argument('--vision_head', default=False, action='store_true')
     parser.add_argument('--average_local', default=False, action='store_true', help='use to average to use average of patch embedings with the cls embedding')
+    parser.add_argument('--backbone_weights', type=str, default=None, help='DINOtxt only: DINOv3 SSL checkpoint whose backbone replaces DINO-TXT\'s, used to overwrite config backbone_weights')
+    parser.add_argument('--backbone_branch', type=str, default=None, choices=['teacher', 'student'], help='branch of --backbone_weights to load, used to overwrite config backbone_branch')
     parser.add_argument('--multiresolution', action='store_true', default=False, help='use to enable multiresolution training')
     parser.add_argument('--geometric_aug', action='store_true', default=None, help='enable geometric augmentation (random crop shift, horizontal flip and 90 degree rotations) in training')
     parser.add_argument('--spectral_aug', action='store_true', default=None, help='enable spectral augmentation (equalization, contrast, sharpen, dichromacy, color cast, vignette, brightness) in training')
     parser.add_argument('--p_spectral', type=float, default=None, help='probability of applying one of the spectral augmentations, used to overwrite config p_spectral')
     parser.add_argument('--nlm_aug', action='store_true', default=None, help='enable NLM denoising augmentation in training (slow, needs opencv)')
+    parser.add_argument('--set', nargs='+', default=[], metavar='KEY=VALUE', help='overwrite any config entry, e.g. --set model.aligner.vision=mlp model.lora.apply=true')
     args = parser.parse_args()
     conf = OmegaConf.load(args.config)
+    if args.set:
+        conf = OmegaConf.merge(conf, OmegaConf.from_dotlist(args.set))
 
     seed_everything(777, workers=True)
 
@@ -69,6 +74,12 @@ if __name__ == '__main__':
 
     if args.lr is not None:
         conf.train.learning_rate = args.lr
+
+    if args.backbone_weights is not None:
+        conf.model.backbone_weights = args.backbone_weights
+
+    if args.backbone_branch is not None:
+        conf.model.backbone_branch = args.backbone_branch
 
     if args.geometric_aug is not None:
         conf.dataset.geometric_aug = args.geometric_aug
@@ -252,7 +263,7 @@ if __name__ == '__main__':
     callbacks = [checkpoint_callback]
 
     strategy = args.strategy
-    if strategy == 'deepspeed_stage_2' and conf.model.lora.apply:
+    if strategy == 'deepspeed_stage_2' and (conf.model.lora.apply or conf.model.name.split(':')[0] == 'DualEncoder'):
         # deepspeed writes its own shards, so frozen backbone weights must be excluded here
         strategy = DeepSpeedStrategy(stage=2, exclude_frozen_parameters=True)
 

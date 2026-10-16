@@ -13,6 +13,7 @@ from LongCLIP.model import longclip
 from lora_utils import mark_only_lora_as_trainable, load_lora, get_list_lora_layers, apply_lora
 from loratorch_utils import apply_lora_attn_mlp
 from model.GeoRSCLIPpreprocess import get_preprocess
+from model.dual_encoder import DualEncoder, TextTokenizer, load_ssl_backbone
 import torch, open_clip
 from peft import LoraConfig, get_peft_model
 from adapter import ResidualProjection
@@ -297,11 +298,23 @@ def get_model(conf):
         weights = '/nethome/recpinfo/users/fibz/cache/dinov3_vitl16_dinotxt.pth'
         repo = 'facebookresearch/dinov3'
         model, tokenizer = torch.hub.load(repo, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source='github', weights=weights)
+        # backbone_weights: a DINOv3 SSL checkpoint whose backbone replaces DINO-TXT's; the pretrained text tower and
+        # vision head are kept, to be re-aligned to it (e.g. with --vision_head: head + LoRA on the text tower)
+        if conf.model.get('backbone_weights'):
+            load_ssl_backbone(model.visual_model.backbone, conf.model.backbone_weights,
+                              conf.model.get('backbone_branch', 'teacher'))
         model = DINOwrap(model)
         model.dim = 2048 if conf.model.average_local else 1024
         model.averaga_local = conf.model.average_local
         tokenize = tokenizer.tokenize
         preprocess =  lambda x: resize_transform(x, conf.model.image_size, 16)
+
+    elif modelFam == 'DualEncoder':
+        # DINOv3 SSL backbone + HF text encoder (e.g. e5-large) aligned by trainable heads, see model/dual_encoder.py
+        model = DualEncoder(conf)
+        tokenize = TextTokenizer(conf.model.text.model_id, conf.model.text.get('prefix', ''),
+                                 conf.model.text.get('max_length', 512))
+        preprocess = lambda x: resize_transform(x, conf.model.image_size, 16)
 
     else:
         raise ValueError('{} not recognized'.format(modelFam))
@@ -349,7 +362,10 @@ class CLIP(L.LightningModule):
         self.multi_val = False
         self.multi_positive = conf.train.multi_positive if hasattr(conf.train, 'multi_positive') else False
         self.loss_fn = torch.nn.CrossEntropyLoss()
-        if conf.model.name.split(':')[0] != 'DINOtxt':
+        self.family = conf.model.name.split(':')[0]
+        if self.family == 'DualEncoder':
+            self.dim = self.model.dim
+        elif self.family != 'DINOtxt':
             self.dim = 512 if conf.model.name.split(':')[1] == 'ViT-B/32' else 768
 
         if conf.dataset.name == 'geo':
@@ -365,7 +381,10 @@ class CLIP(L.LightningModule):
         self.cooling = None
         self.lr = conf.train.learning_rate
         self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
-        self.save_lora_only = bool(conf.model.lora.apply)
+        # DualEncoder: the towers are frozen (or LoRA), so only the heads, adapters and temperature are saved
+        self.save_lora_only = bool(conf.model.lora.apply) or self.family == 'DualEncoder'
+        if self.family == 'DualEncoder':
+            self.lora = 'none'  # LoRA (peft) is injected by DualEncoder itself, per tower
 
         if conf.train.cooling.apply:
             self.cooling = conf.train.cooling.apply
@@ -374,7 +393,10 @@ class CLIP(L.LightningModule):
             self.cooling_steps = conf.train.cooling.iterations
             self.step = 0
 
-        if hasattr(conf.model, 'vision_head_only') and conf.model.vision_head_only is True :
+        if self.family == 'DualEncoder':
+            pass  # trainable parameters are set by DualEncoder (heads, and LoRA per conf.model.lora.encoder)
+
+        elif hasattr(conf.model, 'vision_head_only') and conf.model.vision_head_only is True :
             # only works with dinotxt 
             for name, param in self.model.visual.named_parameters():
                 if 'transformer.head.' not in name:
