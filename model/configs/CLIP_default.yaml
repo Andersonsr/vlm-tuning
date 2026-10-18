@@ -1,5 +1,7 @@
 model:
   name: 'CLIP:ViT-B/32'
+  vision_head_only: false  # DINOtxt: train the vision head only (--vision_head)
+  average_local: false  # DINOtxt: cls + mean patch embedding (--average_local)
   temperature: 100
   lora:
     apply: false
@@ -22,17 +24,33 @@ model:
 train:
   loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
   batch_size: 64
+  gpus: 1  # gpus per node (--gpus)
+  nnodes: 1  # (--nnodes)
+  accelerator: gpu  # gpu, cpu or auto (--accelerator)
+  strategy: auto  # auto, fsdp or deepspeed_stage_2 (--strategy)
   epochs: 100
-  learning_rate: 0.0005
+  learning_rate: 0.0005  # peak learning rate (after the warm-up)
+  optimizer:  # OpenCLIP defaults
+    name: adamw  # adamw, or adam (weight decay as L2)
+    weight_decay: 0.2  # not on biases, gains/norms (1-d parameters) or the temperature
+    betas: [0.9, 0.98]
+    eps: 1.0e-6
+    schedule: cosine  # cosine (after the warm-up) or constant
+    warmup: 10000  # warm-up steps, or a fraction of the training steps when < 1 (e.g. 0.05 for short runs)
+    min_lr_ratio: 0.0  # cosine decays to min_lr_ratio * learning_rate
+    head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
+    grad_clip: null  # gradient norm clipping; null: none
   cooling:
     apply: linear # 'step', 'linear', 'cosine' or false
     final_temp: 34.723667
     iterations: 40000
 dataset:
   name: 'nwpu'
+  multiresolution: false  # geo: train and validate on both resolutions (--multiresolution)
   root: 'D:\\datasets\\nwpu\\'
   train_annotation: 'train.json'
   val_annotation: 'val.json'
   random: True
+name: test  # run name (--name): the run is saved in <output_dir>/<name>, with its config.yaml
 output_dir: 'D:\\checkpoints\\test\\'
 log_interval: 100

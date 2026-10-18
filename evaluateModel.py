@@ -276,7 +276,9 @@ if __name__ == '__main__':
     parser.add_argument('--split', choices=['train', 'val'], default='val')
     parser.add_argument('--batch_size', type=int, default=None, help='logits distributions use the pairs inside each batch, defaults to the training batch size')
     parser.add_argument('--max_batches', type=int, default=None, help='limit the number of batches used, the retrieval gallery has max_batches * batch_size samples')
-    parser.add_argument('--multi_positive', action='store_true', default=None, help='pairs with the same class are positives, defaults to the training setting')
+    parser.add_argument('--multi_positive', action=argparse.BooleanOptionalAction, default=None,
+                        help='pairs with the same class are positives (default, falls back to the paired sample only for '
+                             'datasets without class labels); --no-multi_positive: only the paired sample is a positive')
     parser.add_argument('--bins', type=int, default=100, help='histogram bins of the logits distributions')
     parser.add_argument('--reduction', choices=['pca', 'tsne'], default='pca', help='dimension reduction used to plot both modalities together')
     parser.add_argument('--n_pairs', type=int, default=300, help='number of image-text pairs in the embeddings plot')
@@ -290,7 +292,8 @@ if __name__ == '__main__':
     conf = OmegaConf.load(args.config)
     conf.model.load_weights = True
     batch_size = args.batch_size if args.batch_size is not None else conf.train.batch_size
-    multi_positive = args.multi_positive if args.multi_positive is not None else conf.train.get('multi_positive', False)
+    # multi positive by default for every model, independent of the training setting (train.multi_positive)
+    multi_positive = args.multi_positive if args.multi_positive is not None else True
     # logits and retrieval results depend on how positives are defined, keep both versions side by side
     suffix = '_multipositive' if multi_positive else ''
     output = args.output if args.output is not None else conf.output_dir
@@ -306,20 +309,25 @@ if __name__ == '__main__':
     results = []
     for name, loader in loaders:
         images, texts, labels = collect_features(model, loader, device, args.max_batches)
+        dataset_multi_positive = multi_positive
         if multi_positive and labels is None:
-            raise ValueError('multi positive needs class labels, {} has none'.format(name))
+            if args.multi_positive:
+                raise ValueError('multi positive needs class labels, {} has none'.format(name))
+            print('{} has no class labels, only the paired sample is a positive'.format(name))
+            dataset_multi_positive = False
+        dataset_suffix = '_multipositive' if dataset_multi_positive else ''
         # without multi positive only the paired sample is a positive
-        pair_labels = labels if multi_positive else torch.arange(images.shape[0], device=device)
+        pair_labels = labels if dataset_multi_positive else torch.arange(images.shape[0], device=device)
         # with several geo indices, the dataset name tells the plots apart
         title = base_title if len(loaders) == 1 else '{} {}'.format(base_title, name)
         # the embeddings plot does not depend on how positives are defined, so only the other plots are marked
-        metric_title = '{} multipositive'.format(title) if multi_positive else title
+        metric_title = '{} multipositive'.format(title) if dataset_multi_positive else title
         print(metric_title)
 
         # logits distributions, pairs inside each batch
         positives, negatives = batch_similarities(images, texts, pair_labels, batch_size)
         plot_distributions(positives, negatives, metric_title,
-                           os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, suffix)), args.bins)
+                           os.path.join(output, 'logits_{}_{}{}.png'.format(name, args.split, dataset_suffix)), args.bins)
 
         # retrieval, every sample of the split is in the gallery
         metrics = {
@@ -328,14 +336,14 @@ if __name__ == '__main__':
         }
 
         df = pd.DataFrame([
-            {'experiment': experiment, 'split': args.split, 'dataset': name, 'multi_positive': multi_positive,
+            {'experiment': experiment, 'split': args.split, 'dataset': name, 'multi_positive': dataset_multi_positive,
              'gallery_size': images.shape[0], 'direction': direction, 'k': k, 'recall': recall[k], 'precision': precision[k]}
             for direction, (recall, precision) in metrics.items() for k in KS
         ])
         results.append(df)
         print(df.pivot(index='k', columns='direction', values=['recall', 'precision']).to_string(float_format='{:.4f}'.format))
-        plot_retrieval(df, 'recall', metric_title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, suffix)))
-        plot_retrieval(df, 'precision', metric_title, os.path.join(output, 'precision_{}_{}{}.png'.format(name, args.split, suffix)))
+        plot_retrieval(df, 'recall', metric_title, os.path.join(output, 'retrieval_{}_{}{}.png'.format(name, args.split, dataset_suffix)))
+        plot_retrieval(df, 'precision', metric_title, os.path.join(output, 'precision_{}_{}{}.png'.format(name, args.split, dataset_suffix)))
 
         # both modalities in the same 2D space
         class_names = get_class_names(loader.dataset)

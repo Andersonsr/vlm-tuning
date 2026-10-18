@@ -5,6 +5,8 @@ import os
 from PIL import Image, ImageFile
 import lightning as L
 from torch.optim import AdamW, Adam
+from torch.optim.lr_scheduler import LambdaLR
+from omegaconf import OmegaConf
 import loratorch 
 from model.lora_utils import mark_only_lora_as_trainable
 from model.adapter import residual_adapter
@@ -23,6 +25,42 @@ import math
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
+
+# train.optimizer, defaults of OpenCLIP's training (open_clip_train): AdamW with decoupled weight decay 0.2 (not on
+# biases, gains/norms or other 1-d parameters, nor the temperature), betas (0.9, 0.98), eps 1e-6, linear warm-up of
+# 10000 steps, then cosine decay to 0; no gradient clipping
+OPTIMIZER_DEFAULTS = {
+    'name': 'adamw',  # adamw, or adam (weight decay added to the gradient, L2)
+    'weight_decay': 0.2,
+    'betas': [0.9, 0.98],
+    'eps': 1.0e-6,
+    'schedule': 'cosine',  # cosine (after the warm-up) or constant
+    'warmup': 10000,  # warm-up steps, or a fraction of the training steps when < 1
+    'min_lr_ratio': 0.0,  # cosine decays to min_lr_ratio * learning rate
+    'head_lr': None,  # learning rate of new heads (DualEncoder heads, DINOtxt vision head, adapters); null: learning_rate
+    'grad_clip': None,  # gradient norm clipping (trainer gradient_clip_val); null: none
+}
+
+
+def no_weight_decay(name, param):
+    # as OpenCLIP: biases, gains and norm weights (1-d), the temperature and the sigmoid bias
+    return param.ndim < 2 or 'bias' in name or 'logit_' in name
+
+
+def is_head(name):
+    # parameters of new heads (trained from scratch), which head_lr applies to; LoRA adapters are not heads
+    return 'lora_' not in name and any(m in name for m in ('vision_head.', 'text_head.', '.head.', 'adapter.'))
+
+
+def lr_factor(step, warmup, total, schedule, min_lr_ratio):
+    """Learning rate multiplier at an optimizer step: linear warm-up (OpenCLIP: (step + 1) / warmup), then constant or
+    cosine decay from 1 to min_lr_ratio at the last step."""
+    if step < warmup:
+        return (step + 1) / warmup
+    if schedule == 'constant':
+        return 1.0
+    progress = min((step - warmup) / max(1, total - warmup), 1.0)
+    return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
 
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -381,6 +419,9 @@ class CLIP(L.LightningModule):
         if conf.dataset.name == 'geo':
             self.multi_val = True
             self.geo_indices_val = conf.dataset.geo_index_val
+        # validation metrics averaged over the fields (on_validation_epoch_end): val_loss, mean_i2t_r@k, mean_t2i_r@k
+        self.val_metrics = ['val_loss'] + [f'{d}_r@{k}' for d in ('i2t', 't2i') for k in (1, 5, 10)]
+        self.val_sums = None
 
         self.model.logit_scale = torch.nn.Parameter(
             torch.log(torch.ones(1) * conf.model.temperature),
@@ -390,6 +431,7 @@ class CLIP(L.LightningModule):
         self.train_temperature = conf.model.train_temperature
         self.cooling = None
         self.lr = conf.train.learning_rate
+        self.optim_conf = OmegaConf.merge(OPTIMIZER_DEFAULTS, conf.train.get('optimizer') or {})
         self.lora = conf.model.lora.lib if conf.model.lora.apply else 'none'
         # DualEncoder: the towers are frozen (or LoRA), so only the heads, adapters and temperature are saved
         self.save_lora_only = bool(conf.model.lora.apply) or self.family == 'DualEncoder'
@@ -565,8 +607,55 @@ class CLIP(L.LightningModule):
             loratorch.register_model_param_after_backward(self.model)
 
     def configure_optimizers(self):
-        params = filter(lambda p: p.requires_grad, self.parameters())
-        return Adam(params, lr=self.lr)
+        o = self.optim_conf
+        if o.name not in ('adamw', 'adam'):
+            raise ValueError(f'unknown train.optimizer.name {o.name} (adamw, adam)')
+        if o.schedule not in ('cosine', 'constant'):
+            raise ValueError(f'unknown train.optimizer.schedule {o.schedule} (cosine, constant)')
+        # one group per (learning rate, weight decay)
+        groups = {}
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            lr = o.head_lr if o.head_lr is not None and is_head(name) else self.lr
+            wd = 0.0 if no_weight_decay(name, param) else o.weight_decay
+            groups.setdefault((lr, wd), []).append(param)
+        param_groups = [{'params': params, 'lr': lr, 'weight_decay': wd} for (lr, wd), params in groups.items()]
+        for (lr, wd), params in groups.items():
+            print(f'optimizer group: lr {lr} weight decay {wd}: {sum(p.numel() for p in params) / 1e6:.3f}M params')
+        optimizer = (AdamW if o.name == 'adamw' else Adam)(param_groups, betas=tuple(o.betas), eps=o.eps)
+
+        total = self.trainer.estimated_stepping_batches
+        warmup = int(o.warmup * total) if o.warmup < 1 else int(o.warmup)
+        if warmup >= total / 2:
+            print(f'WARNING: train.optimizer.warmup is {warmup} of {total} training steps; set a fraction (e.g. 0.05) '
+                  'or fewer steps for short runs')
+        schedule = LambdaLR(optimizer, lambda step: lr_factor(step, warmup, total, o.schedule, o.min_lr_ratio))
+        return {'optimizer': optimizer, 'lr_scheduler': {'scheduler': schedule, 'interval': 'step'}}
+
+    def on_validation_epoch_start(self):
+        if self.multi_val:
+            # per field (validation loader): batch-size weighted sums of val_metrics, and the number of samples
+            self.val_sums = torch.zeros(len(self.geo_indices_val), len(self.val_metrics), device=self.device)
+            self.val_counts = torch.zeros(len(self.geo_indices_val), device=self.device)
+
+    def log_val(self, prefix, dataloader_idx, metric, value, bs):
+        self.log(f'{prefix}{metric}', value, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+        if self.multi_val and metric in self.val_metrics:
+            self.val_sums[dataloader_idx, self.val_metrics.index(metric)] += value.detach().float() * bs
+
+    def on_validation_epoch_end(self):
+        if not self.multi_val or self.val_sums is None:
+            return
+        # all ranks' batches, then each field's mean and the mean over the fields (each field weighs the same)
+        sums = self.trainer.strategy.reduce(self.val_sums, reduce_op='sum')
+        counts = self.trainer.strategy.reduce(self.val_counts, reduce_op='sum')
+        seen = counts > 0
+        if not seen.any():
+            return
+        means = (sums[seen] / counts[seen, None]).mean(0)
+        for metric, value in zip(self.val_metrics, means):
+            self.log(metric if metric == 'val_loss' else f'mean_{metric}', value, sync_dist=False)
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         dataset = ''
@@ -597,8 +686,8 @@ class CLIP(L.LightningModule):
 
             centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
             pairwise_distance = torch.diagonal(torch.cdist(pooled_image, text_features, p=2)).mean()
-            self.log(f'{dataset}centroid distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
-            self.log(f'{dataset}pairwise distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+            self.log(f'{dataset}centroid_distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+            self.log(f'{dataset}pairwise_distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
 
             logit_scale = self.model.logit_scale.exp()
             logits_per_image = logit_scale.to(image_features.device) * pairwise_similarity(image_features, text_features)
@@ -608,7 +697,6 @@ class CLIP(L.LightningModule):
             if self.loss_type == 'siglip':
                 labels = batch['class'] if self.multi_positive else torch.arange(bs, device=image_features.device)
                 loss = self.siglip_loss(logits_per_image, labels, labels)
-                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )
 
             elif not self.multi_positive:
                 labels = torch.arange(
@@ -618,7 +706,6 @@ class CLIP(L.LightningModule):
                 )
 
                 loss = (self.loss_fn(logits_per_image, labels) + self.loss_fn(logits_per_text, labels)) / 2
-                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )  
 
             else:
                 labels = batch['class']
@@ -636,9 +723,12 @@ class CLIP(L.LightningModule):
 
                 # Symmetric image-text loss
                 loss = (loss_i2t + loss_t2i) / 2
-                self.log("val_loss", loss, sync_dist=True, batch_size=bs, )  
 
-           
+            # per field: <field>_val_loss (geo), else val_loss
+            if self.multi_val:
+                self.val_counts[dataloader_idx] += bs
+            self.log_val(dataset, dataloader_idx, 'val_loss', loss, bs)
+
             #retrieval
             if not self.multi_positive:
                 targets = torch.eye(logits_per_image.shape[0]).to(logits_per_image.device)
@@ -652,8 +742,8 @@ class CLIP(L.LightningModule):
 
             # images as queries, and texts as queries (transposed matrices), measured separately
             for k in [1, 5, 10]:
-                self.log(f'{dataset}i2t r@{k}', recall_at_k(logits_per_image, targets, k), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
-                self.log(f'{dataset}t2i r@{k}', recall_at_k(logits_per_text, targets.T, k), sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+                self.log_val(dataset, dataloader_idx, f'i2t_r@{k}', recall_at_k(logits_per_image, targets, k), bs)
+                self.log_val(dataset, dataloader_idx, f't2i_r@{k}', recall_at_k(logits_per_text, targets.T, k), bs)
 
     def multi_positive_loss(self, logits, query_labels, key_labels):
         """

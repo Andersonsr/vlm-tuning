@@ -3,8 +3,10 @@
 #   NAME=dual-qformer sbatch slurm/train.sbatch --multiresolution --set model.vision.weights=/path/to/ssl.pth
 # CONFIG (default model/configs/dual_default.yaml) picks the config; extra arguments go to trainLight.py.
 # 3 minutes before the time limit slurm sends SIGUSR1: lightning saves <output_dir>/<NAME>/hpc_ckpt_<n>.ckpt and
-# requeues the job, which resumes from it (--requeue) and logs to the same wandb run. A job that dies without the
-# signal (node failure, scancel) is resumed the same way from last.ckpt by submitting it again with the same NAME.
+# requeues the job, which resumes from it (--requeue: the run's saved config.yaml and newest checkpoint) and logs to
+# the same wandb run. A job that dies without the signal (node failure, scancel) is resumed the same way from
+# last.ckpt by submitting it again with the same NAME; the saved config is used, extra arguments that change it are
+# applied with a warning.
 #SBATCH --job-name=vlm-tuning
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4          # one task per GPU, lightning reads the ranks from slurm (must equal --gpus)

@@ -54,10 +54,23 @@ train:
   loss: 'contrastive'  # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
   batch_size: 192  # * n_gpus
   gpus: 1
+  nnodes: 1  # (--nnodes)
+  accelerator: gpu  # gpu, cpu or auto (--accelerator)
+  strategy: auto  # auto, fsdp or deepspeed_stage_2 (--strategy)
   epochs: 200
   local_loss: false
-  learning_rate: 0.0005
-  monitor: 'val_loss'
+  learning_rate: 0.0005  # peak learning rate (after the warm-up)
+  optimizer:  # OpenCLIP defaults
+    name: adamw  # adamw, or adam (weight decay as L2)
+    weight_decay: 0.2  # not on biases, gains/norms (1-d parameters) or the temperature
+    betas: [0.9, 0.98]
+    eps: 1.0e-6
+    schedule: cosine  # cosine (after the warm-up) or constant
+    warmup: 10000  # warm-up steps, or a fraction of the training steps when < 1 (e.g. 0.05 for short runs)
+    min_lr_ratio: 0.0  # cosine decays to min_lr_ratio * learning_rate
+    head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
+    grad_clip: null  # gradient norm clipping; null: none
+  monitor: 'val_loss'  # mean over the validation fields; or mean_t2i_r@5, or one field: composition_val_loss, composition_t2i_r@5
   multi_positive: false
   cooling:
     apply: cosine  # 'step', 'linear', 'cosine' or false
@@ -65,6 +78,7 @@ train:
     iterations: 1.0
 dataset:
   name: 'geo'
+  multiresolution: false  # geo: train and validate on both resolutions (--multiresolution)
   root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'
   train_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/train.csv'
   val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
@@ -78,5 +92,6 @@ dataset:
   geo_index_val: [1]
   geo_group: [2, 3]
   resolutions: [256, 512]
+name: test  # run name (--name): the run is saved in <output_dir>/<name>, with its config.yaml
 output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
 log_interval: 6
