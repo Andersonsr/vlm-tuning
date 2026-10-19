@@ -297,8 +297,8 @@ if __name__ == '__main__':
             
 
         # one validation loader per field (description type), with both resolutions when multiresolution is on: the
-        # metrics are logged per field (<field>_val_loss, <field>_t2i_r@5, ...) and averaged over the fields (val_loss,
-        # mean_t2i_r@5, ...). Batches never mix resolutions (the sampler draws each from a single dataset)
+        # metrics are logged per field (<field>_val_loss, '<field>_t2i r@5', ...) and averaged over the fields (val_loss,
+        # 'mean_t2i r@5', ...). Batches never mix resolutions (the sampler draws each from a single dataset)
         val_loader = []
         for idx in conf.dataset.geo_index_val:
             sizes = [(conf.dataset.resolutions[-1], True)]

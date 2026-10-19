@@ -419,8 +419,8 @@ class CLIP(L.LightningModule):
         if conf.dataset.name == 'geo':
             self.multi_val = True
             self.geo_indices_val = conf.dataset.geo_index_val
-        # validation metrics averaged over the fields (on_validation_epoch_end): val_loss, mean_i2t_r@k, mean_t2i_r@k
-        self.val_metrics = ['val_loss'] + [f'{d}_r@{k}' for d in ('i2t', 't2i') for k in (1, 5, 10)]
+        # validation metrics averaged over the fields (on_validation_epoch_end): val_loss, mean_i2t r@k, mean_t2i r@k (names with a space, as older runs)
+        self.val_metrics = ['val_loss'] + [f'{d} r@{k}' for d in ('i2t', 't2i') for k in (1, 5, 10)]
         self.val_sums = None
 
         self.model.logit_scale = torch.nn.Parameter(
@@ -686,8 +686,8 @@ class CLIP(L.LightningModule):
 
             centroid_distance = torch.linalg.norm(image_centroid - texts_centroid)
             pairwise_distance = torch.diagonal(torch.cdist(pooled_image, text_features, p=2)).mean()
-            self.log(f'{dataset}centroid_distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
-            self.log(f'{dataset}pairwise_distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+            self.log(f'{dataset}centroid distance', centroid_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
+            self.log(f'{dataset}pairwise distance', pairwise_distance, sync_dist=True, add_dataloader_idx=False, batch_size=bs)
 
             logit_scale = self.model.logit_scale.exp()
             logits_per_image = logit_scale.to(image_features.device) * pairwise_similarity(image_features, text_features)
@@ -742,8 +742,8 @@ class CLIP(L.LightningModule):
 
             # images as queries, and texts as queries (transposed matrices), measured separately
             for k in [1, 5, 10]:
-                self.log_val(dataset, dataloader_idx, f'i2t_r@{k}', recall_at_k(logits_per_image, targets, k), bs)
-                self.log_val(dataset, dataloader_idx, f't2i_r@{k}', recall_at_k(logits_per_text, targets.T, k), bs)
+                self.log_val(dataset, dataloader_idx, f'i2t r@{k}', recall_at_k(logits_per_image, targets, k), bs)
+                self.log_val(dataset, dataloader_idx, f't2i r@{k}', recall_at_k(logits_per_text, targets.T, k), bs)
 
     def multi_positive_loss(self, logits, query_labels, key_labels):
         """
