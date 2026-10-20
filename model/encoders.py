@@ -422,6 +422,8 @@ class CLIP(L.LightningModule):
         # validation metrics averaged over the fields (on_validation_epoch_end): val_loss, mean_i2t r@k, mean_t2i r@k (names with a space, as older runs)
         self.val_metrics = ['val_loss'] + [f'{d} r@{k}' for d in ('i2t', 't2i') for k in (1, 5, 10)]
         self.val_sums = None
+        # optimizer steps skipped because of non-finite gradients (on_before_optimizer_step), kept across resumes
+        self.skipped_steps = 0
 
         self.model.logit_scale = torch.nn.Parameter(
             torch.log(torch.ones(1) * conf.model.temperature),
@@ -596,15 +598,38 @@ class CLIP(L.LightningModule):
             checkpoint['lora_only'] = True
         if self.cooling is not None:
             checkpoint['cooling_step'] = self.step
+        checkpoint['skipped_steps'] = self.skipped_steps
 
     def on_load_checkpoint(self, checkpoint):
         # resuming (trainLight --resume): continue the temperature schedule where it stopped
         if self.cooling is not None and 'cooling_step' in checkpoint:
             self.step = checkpoint['cooling_step']
+        self.skipped_steps = checkpoint.get('skipped_steps', 0)
 
     def on_after_backward(self):
         if self.lora == 'loratorch':
             loratorch.register_model_param_after_backward(self.model)
+
+    def on_before_optimizer_step(self, optimizer):
+        """Logs the gradient norm (before clipping) and skips the step when it is not finite (a nan/inf loss or
+        gradient): the gradients are dropped, so the optimizer leaves the weights and its moments unchanged, and
+        skipped_steps counts it. With DDP the gradients are already averaged over the GPUs, so every rank takes the
+        same decision. DeepSpeed keeps the gradients in its own buffers: no norm or skipping there."""
+        grads = [p.grad for group in optimizer.param_groups for p in group['params'] if p.grad is not None]
+        if not grads:
+            return
+        norm = torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g.detach().float()) for g in grads]))
+        finite = bool(torch.isfinite(norm))
+        if not finite:
+            for group in optimizer.param_groups:
+                for p in group['params']:
+                    p.grad = None
+            self.skipped_steps += 1
+            print(f'step {self.global_step}: non-finite gradient norm ({norm.item()}), optimizer step skipped '
+                  f'({self.skipped_steps} so far)')
+        if finite:  # an inf in the plot would hide the scale of the finite norms
+            self.log('grad_norm', norm, batch_size=1)
+        self.log('skipped_steps', float(self.skipped_steps), batch_size=1)
 
     def configure_optimizers(self):
         o = self.optim_conf

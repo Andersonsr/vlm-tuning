@@ -1,11 +1,20 @@
 """DualEncoder: a DINOv3 SSL vision backbone and a HuggingFace text encoder (e.g. multilingual-e5-large), pretrained
 separately and aligned by trainable heads on top of them (LiT-like when the towers are frozen).
 
-conf.model (see configs/dual_default.yaml):
-    vision.repo/source/arch   torch hub entry of the backbone (dinov3_vitl16), built without pretrained weights
-    vision.weights/branch     DINOv3 SSL checkpoint ('<branch>.backbone.' keys) loaded into it
+conf.model (see configs/dual_default.yaml and configs/dual_dinotxt.yaml):
+    vision.type               'ssl' (default): a DINOv3 backbone with SSL weights; 'dinotxt': DINO-TXT's vision tower,
+                              the DINOv3 ViT-L backbone and DINO-TXT's vision head (2 transformer blocks on its tokens),
+                              both pretrained; the text tower of DINO-TXT is dropped
+    vision.repo/source/arch   torch hub entry of the backbone (ssl: dinov3_vitl16, built without pretrained weights;
+                              dinotxt: dinov3_vitl16_dinotxt_tet1280d20h24l)
+    vision.weights/branch     ssl: DINOv3 SSL checkpoint ('<branch>.backbone.' keys) loaded into the backbone (required);
+                              dinotxt: optional, replaces DINO-TXT's backbone, its vision head is kept
+    vision.dinotxt_weights    dinotxt: DINO-TXT checkpoint (vision head and text encoder), required
+    vision.backbone_weights   dinotxt: DINOv3 ViT-L weights of the backbone (null: the hub's default, LVD-1689M)
+    vision.train_head         dinotxt: train DINO-TXT's vision head (default frozen, as the backbone)
     vision.tokens             qformer input: 'patch' or 'cls+patch'
-    vision.pooled             mlp/linear input: 'cls' or 'cls+mean' (CLS concatenated with the mean patch token)
+    vision.pooled             mlp/linear input: 'cls' or 'cls+mean' (CLS concatenated with the mean patch token; with
+                              dinotxt, cls+mean is DINO-TXT's own image embedding)
     text.model_id/pooling/prefix/max_length
     aligner.vision            'qformer', 'mlp' or 'linear'
     aligner.text              'linear', 'mlp' or 'none' (text embedding used as is: locked text space, LiT)
@@ -139,14 +148,42 @@ class TextTokenizer:
         return torch.stack([enc['input_ids'], enc['attention_mask']], dim=1)
 
 
+def load_dinotxt_vision(v):
+    """DINO-TXT's vision tower (dinov3.eval.text.vision_tower.VisionTower: .backbone, the DINOv3 ViT-L, and .head, the
+    vision head), with the backbone weights (v.backbone_weights, or the hub's default) and DINO-TXT's head weights
+    (v.dinotxt_weights); with v.weights, an SSL checkpoint replaces the backbone, the head is kept."""
+    if not v.get('dinotxt_weights'):
+        raise ValueError('model.vision.dinotxt_weights: path to the DINO-TXT checkpoint is required with type dinotxt')
+    kwargs = {'backbone_weights': v.backbone_weights} if v.get('backbone_weights') else {}
+    model, _ = torch.hub.load(v.repo, v.arch, source=v.source, pretrained=True, weights=v.dinotxt_weights, **kwargs)
+    state = torch.load(v.dinotxt_weights, map_location='cpu', weights_only=False)
+    state = state.get('model', state.get('state_dict', state))
+    head = {k for k in state if k.startswith('visual_model.head.')}
+    if not head:
+        raise RuntimeError(f'no visual_model.head.* weights in {v.dinotxt_weights}')
+    print(f'loaded DINO-TXT vision head ({len(head)} tensors) from {v.dinotxt_weights}')
+    tower = model.visual_model
+    if v.get('weights'):
+        load_ssl_backbone(tower.backbone, v.weights, v.get('branch', 'teacher'))
+    return tower
+
+
 class DualEncoder(nn.Module):
     def __init__(self, conf):
         super().__init__()
         v, t, a, lora = conf.model.vision, conf.model.text, conf.model.aligner, conf.model.lora
-        self.backbone = torch.hub.load(v.repo, v.arch, source=v.source, pretrained=False)
-        if not v.get('weights'):
-            raise ValueError('model.vision.weights: path to the DINOv3 SSL checkpoint is required')
-        load_ssl_backbone(self.backbone, v.weights, v.get('branch', 'teacher'))
+        self.vision_type = v.get('type', 'ssl')
+        if self.vision_type == 'dinotxt':
+            self.backbone = load_dinotxt_vision(v)
+            vit = self.backbone.backbone
+        elif self.vision_type == 'ssl':
+            self.backbone = torch.hub.load(v.repo, v.arch, source=v.source, pretrained=False)
+            if not v.get('weights'):
+                raise ValueError('model.vision.weights: path to the DINOv3 SSL checkpoint is required')
+            load_ssl_backbone(self.backbone, v.weights, v.get('branch', 'teacher'))
+            vit = self.backbone
+        else:
+            raise ValueError(f'unknown model.vision.type {self.vision_type} (ssl, dinotxt)')
         self.text = AutoModel.from_pretrained(t.model_id)
         if t.get('grad_checkpointing', False):
             self.text.gradient_checkpointing_enable()
@@ -154,7 +191,9 @@ class DualEncoder(nn.Module):
         if self.text_pooling not in ('mean', 'cls', 'last'):
             raise ValueError(f'unknown text pooling {self.text_pooling} (mean, cls, last)')
 
-        vision_dim, text_dim = self.backbone.embed_dim, self.text.config.hidden_size
+        vision_dim, text_dim = vit.embed_dim, self.text.config.hidden_size
+        if self.vision_type == 'dinotxt' and isinstance(self.backbone.head.linear_projection, nn.Linear):
+            vision_dim = self.backbone.head.linear_projection.out_features
         self.dim = a.embed_dim
         self.vision_kind = a.vision
         self.vision_tokens = v.get('tokens', 'cls+patch')
@@ -175,7 +214,12 @@ class DualEncoder(nn.Module):
                 self._add_lora(self.backbone, lora, list(lora.get('vision_targets', ['qkv'])))
             if 'text' in towers:
                 self._add_lora(self.text, lora, list(lora.get('text_targets', ['query', 'key', 'value'])))
-        self.vision_trainable = any(p.requires_grad for p in self.backbone.parameters())
+        if self.vision_type == 'dinotxt' and v.get('train_head', False):
+            for p in self.backbone.head.parameters():
+                p.requires_grad = True
+        # vision_trainable: the ViT (LoRA); head_trainable: DINO-TXT's vision head (train_head or LoRA)
+        self.vision_trainable = any(p.requires_grad for p in vit.parameters())
+        self.head_trainable = self.vision_type == 'dinotxt' and any(p.requires_grad for p in self.backbone.head.parameters())
         self.text_trainable = any(p.requires_grad for p in self.text.parameters())
         self.logit_scale = nn.Parameter(torch.log(torch.ones(1) * 100.))  # replaced by the CLIP module
 
@@ -190,15 +234,33 @@ class DualEncoder(nn.Module):
     def train(self, mode=True):
         super().train(mode)
         # frozen towers: no dropout, they are fixed feature extractors
-        for tower, trainable in ((self.backbone, self.vision_trainable), (self.text, self.text_trainable)):
+        towers = [(self.text, self.text_trainable)]
+        if self.vision_type == 'dinotxt':
+            towers += [(self.backbone.backbone, self.vision_trainable), (self.backbone.head, self.head_trainable)]
+        else:
+            towers.append((self.backbone, self.vision_trainable))
+        for tower, trainable in towers:
             if not trainable:
                 tower.eval()
         return self
 
+    def vision_tokens_of(self, image):
+        """CLS [b, d] and patch tokens [b, n, d]: of the backbone (ssl), or out of DINO-TXT's vision head (dinotxt; the
+        frozen parts run without gradients)."""
+        grad = torch.is_grad_enabled()
+        if self.vision_type == 'ssl':
+            with torch.set_grad_enabled(grad and self.vision_trainable):
+                out = self.backbone.forward_features(image)
+            return out['x_norm_clstoken'], out['x_norm_patchtokens']
+        tower = self.backbone
+        with torch.set_grad_enabled(grad and self.vision_trainable):
+            cls, patches, registers = tower.get_backbone_features(image)
+        with torch.set_grad_enabled(grad and (self.vision_trainable or self.head_trainable)):
+            tokens = tower.head(torch.cat([cls.unsqueeze(1), registers, patches], dim=1))
+        return tokens[:, 0], tokens[:, tower.num_register_tokens + 1:]
+
     def encode_image(self, image):
-        with torch.set_grad_enabled(torch.is_grad_enabled() and self.vision_trainable):
-            out = self.backbone.forward_features(image)
-        cls, patches = out['x_norm_clstoken'], out['x_norm_patchtokens']
+        cls, patches = self.vision_tokens_of(image)
         if self.vision_kind == 'qformer':
             tokens = torch.cat([cls[:, None], patches], 1) if self.vision_tokens == 'cls+patch' else patches
             return self.vision_head(tokens)

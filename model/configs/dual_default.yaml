@@ -5,6 +5,7 @@ model:
   vision_head_only: false
   average_local: false
   vision:
+    type: ssl  # ssl: DINOv3 backbone with SSL weights; dinotxt: DINO-TXT vision tower (see dual_dinotxt.yaml)
     repo: facebookresearch/dinov3  # torch hub repo of the backbone (or a local clone with source: local)
     source: github
     arch: dinov3_vitl16  # built without pretrained weights, then loaded from weights
