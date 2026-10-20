@@ -2,7 +2,7 @@ model:
   name: DualEncoder:dinotxt-e5large  # DINO-TXT vision tower (backbone + vision head) + HF text encoder, see model/dual_encoder.py
   temperature: 100.0
   image_size: 224
-  vision_head_only: false
+  vision_head_only: false  # ignored by DualEncoder (DINOtxt family only); see vision.train_head
   average_local: false
   vision:
     type: dinotxt  # DINO-TXT's vision tower: DINOv3 ViT-L backbone + DINO-TXT's vision head, its text tower is dropped
@@ -13,7 +13,7 @@ model:
     backbone_weights: null  # DINOv3 ViT-L weights, path keeping the official file name (...-8aa4cbdd.pth); null: the hub's default (LVD-1689M), as DINO-TXT
     weights: null  # optional DINOv3 SSL checkpoint replacing the backbone (DINO-TXT's vision head is kept)
     branch: teacher  # teacher (EMA) or student weights of weights
-    train_head: false  # train DINO-TXT's vision head (frozen by default, as the backbone)
+    train_head: false  # dinotxt: also train DINO-TXT's vision head (frozen by default), with the new heads always trained; not model.vision_head_only
     tokens: cls+patch  # qformer input: 'patch' or 'cls+patch' (tokens out of DINO-TXT's vision head)
     pooled: cls+mean  # mlp/linear input: 'cls' or 'cls+mean' (cls+mean: DINO-TXT's own 2048-d image embedding)
   text:
@@ -70,7 +70,7 @@ train:
     betas: [0.9, 0.98]
     eps: 1.0e-6
     schedule: cosine  # cosine (after the warm-up) or constant
-    warmup: 10000  # warm-up steps, or a fraction of the training steps when < 1 (e.g. 0.05 for short runs)
+    warmup: 0.05  # fraction of the training steps when < 1 (0.05: 5%), or warm-up steps (e.g. 10000, as OpenCLIP)
     min_lr_ratio: 0.0  # cosine decays to min_lr_ratio * learning_rate
     head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
     grad_clip: null  # gradient norm clipping; null: none

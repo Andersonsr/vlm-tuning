@@ -2,14 +2,14 @@ model:
   name: DualEncoder:ssl-e5large  # DINOv3 SSL vision backbone + HF text encoder, see model/dual_encoder.py
   temperature: 100.0
   image_size: 224
-  vision_head_only: false
+  vision_head_only: false  # ignored by DualEncoder (DINOtxt family only); see vision.train_head
   average_local: false
   vision:
     type: ssl  # ssl: DINOv3 backbone with SSL weights; dinotxt: DINO-TXT vision tower (see dual_dinotxt.yaml)
     repo: facebookresearch/dinov3  # torch hub repo of the backbone (or a local clone with source: local)
     source: github
     arch: dinov3_vitl16  # built without pretrained weights, then loaded from weights
-    weights: null  # required: DINOv3 SSL checkpoint ('<branch>.backbone.' keys under 'model')
+    weights: /nethome/recpinfo/users/fibz/data/checkpoint/dino/fossil-datasetv4-512/ckpt/11999/consolidated_model/pytorch_model.bin  # required: DINOv3 SSL checkpoint ('<branch>.backbone.' keys under 'model')
     branch: teacher  # teacher (EMA) or student weights of the checkpoint
     tokens: cls+patch  # qformer input: 'patch' or 'cls+patch'
     pooled: cls  # mlp/linear input: 'cls' or 'cls+mean' (CLS concatenated with the mean patch token)
@@ -67,7 +67,7 @@ train:
     betas: [0.9, 0.98]
     eps: 1.0e-6
     schedule: cosine  # cosine (after the warm-up) or constant
-    warmup: 10000  # warm-up steps, or a fraction of the training steps when < 1 (e.g. 0.05 for short runs)
+    warmup: 0.05  # fraction of the training steps when < 1 (0.05: 5%), or warm-up steps (e.g. 10000, as OpenCLIP)
     min_lr_ratio: 0.0  # cosine decays to min_lr_ratio * learning_rate
     head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
     grad_clip: null  # gradient norm clipping; null: none

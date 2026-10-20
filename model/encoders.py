@@ -35,7 +35,7 @@ OPTIMIZER_DEFAULTS = {
     'betas': [0.9, 0.98],
     'eps': 1.0e-6,
     'schedule': 'cosine',  # cosine (after the warm-up) or constant
-    'warmup': 10000,  # warm-up steps, or a fraction of the training steps when < 1
+    'warmup': 0.05,  # fraction of the training steps when < 1, or warm-up steps
     'min_lr_ratio': 0.0,  # cosine decays to min_lr_ratio * learning rate
     'head_lr': None,  # learning rate of new heads (DualEncoder heads, DINOtxt vision head, adapters); null: learning_rate
     'grad_clip': None,  # gradient norm clipping (trainer gradient_clip_val); null: none
@@ -614,8 +614,14 @@ class CLIP(L.LightningModule):
         """Logs the gradient norm (before clipping) and skips the step when it is not finite (a nan/inf loss or
         gradient): the gradients are dropped, so the optimizer leaves the weights and its moments unchanged, and
         skipped_steps counts it. With DDP the gradients are already averaged over the GPUs, so every rank takes the
-        same decision. DeepSpeed keeps the gradients in its own buffers: no norm or skipping there."""
-        grads = [p.grad for group in optimizer.param_groups for p in group['params'] if p.grad is not None]
+        same decision. DeepSpeed keeps the gradients in its own buffers: no norm or skipping there.
+        Also logs the learning rate of this step: learning_rate, and head_learning_rate when train.optimizer.head_lr
+        sets another one for the new heads (groups told apart by their peak, 'initial_lr', set by the scheduler)."""
+        for group in optimizer.param_groups:
+            peak = group.get('initial_lr', group['lr'])
+            name = 'learning_rate' if peak == self.lr else 'head_learning_rate'
+            self.log(name, float(group['lr']), batch_size=1)
+        grads =[p.grad for group in optimizer.param_groups for p in group['params'] if p.grad is not None]
         if not grads:
             return
         norm = torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g.detach().float()) for g in grads]))

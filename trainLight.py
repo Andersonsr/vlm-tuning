@@ -10,7 +10,7 @@ import lightning as L
 from lightning.pytorch import seed_everything
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader, ConcatDataset
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.strategies import DeepSpeedStrategy
 from glob import glob
 from model.createModel import createModel
@@ -361,7 +361,7 @@ if __name__ == '__main__':
         save_last=True,  # Save the last checkpoint with a "last.ckpt" file name
     )
 
-    callbacks = [checkpoint_callback, LearningRateMonitor(logging_interval='step')]
+    callbacks = [checkpoint_callback]  # the learning rate is logged by the model (learning_rate, head_learning_rate)
 
     strategy = conf.train.strategy
     if strategy == 'deepspeed_stage_2' and (conf.model.lora.apply or conf.model.name.split(':')[0] == 'DualEncoder'):
