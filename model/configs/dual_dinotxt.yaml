@@ -77,7 +77,7 @@ train:
   monitor: 'val_loss'  # mean over the validation fields; or 'mean_t2i r@5', or one field: composition_val_loss, 'composition_t2i r@5' (quote names with a space: --set "train.monitor=composition_t2i r@5")
   multi_positive: false
   cooling:
-    apply: cosine  # 'step', 'linear', 'cosine' or false
+    apply: false  # temperature fixed at model.temperature; or 'step', 'linear', 'cosine', 'log' (linear in log space) to cool it to final_temp
     final_temp: 30.0
     iterations: 1.0
 dataset:

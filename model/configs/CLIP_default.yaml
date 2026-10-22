@@ -41,7 +41,7 @@ train:
     head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
     grad_clip: null  # gradient norm clipping; null: none
   cooling:
-    apply: linear # 'step', 'linear', 'cosine' or false
+    apply: false  # temperature fixed at model.temperature; or 'step', 'linear', 'cosine', 'log' (linear in log space) to cool it to final_temp
     final_temp: 34.723667
     iterations: 40000
 dataset:

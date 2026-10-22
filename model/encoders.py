@@ -559,6 +559,12 @@ class CLIP(L.LightningModule):
             progress = min(self.step / self.cooling_steps, 1.0)
             temperature = self.target_temperature + 0.5 * (self.initial_temperature - self.target_temperature) * (1 + math.cos(math.pi * progress))
 
+        elif self.cooling == 'log':
+            # linear in log space (the logit_scale parameter itself): geometric decay, the same ratio every step,
+            # so it falls faster while the scale is high and slower near final_temp than 'linear'
+            progress = min(self.step / self.cooling_steps, 1.0)
+            temperature = math.exp((1 - progress) * math.log(self.initial_temperature) + progress * math.log(self.target_temperature))
+
         else:
             raise ValueError(f'Cooling rate {self.cooling} not recognized')
 

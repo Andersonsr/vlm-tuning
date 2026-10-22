@@ -1,6 +1,6 @@
 model:
   name: DualEncoder:ssl-e5large  # DINOv3 SSL vision backbone + HF text encoder, see model/dual_encoder.py
-  temperature: 100.0
+  temperature: 30.0
   image_size: 224
   vision_head_only: false  # ignored by DualEncoder (DINOtxt family only); see vision.train_head
   average_local: false
@@ -28,7 +28,7 @@ model:
     width: 768
     heads: 12
     dropout: 0.1
-    pooling: mean  # qformer outputs pooled by 'mean', taken from the 'first' query, or 'max': BLIP-2, the query with the
+    pooling: max  # qformer outputs pooled by 'mean', taken from the 'first' query, or 'max': BLIP-2, the query with the
                    # highest similarity to the text gives the image-text score
   lora:
     apply: false  # towers are frozen unless LoRA is applied to them
@@ -74,7 +74,7 @@ train:
   monitor: 'val_loss'  # mean over the validation fields; or 'mean_t2i r@5', or one field: composition_val_loss, 'composition_t2i r@5' (quote names with a space: --set "train.monitor=composition_t2i r@5")
   multi_positive: false
   cooling:
-    apply: cosine  # 'step', 'linear', 'cosine' or false
+    apply: false  # temperature fixed at model.temperature; or 'step', 'linear', 'cosine', 'log' (linear in log space) to cool it to final_temp
     final_temp: 30.0
     iterations: 1.0
 dataset:
