@@ -1,0 +1,305 @@
+"""
+Image-to-image retrieval with vision encoders, with the metrics of text_retrieval.py, to compare the encoders on the
+thin-section images.
+
+Every distinct combination of labels of a description type (campo) is a class. Each image is a query against every
+other image of the same campo:
+    exact     the positives are the images with exactly the same labels; R@K is the share of queries with a positive
+              in the top K, mAP the mean average precision. Only queries with a positive count.
+    graded    nDCG@10 with relevance = Jaccard overlap of the two label sets (as (category, value) pairs), so images
+              sharing most labels count too; every image is a query.
+Each (image, labels) pair is used once per campo; the same image under other labels (another annotation) is left out
+of its rankings, since its embedding is identical. --exclude_same_slide also leaves out the images of the query's slide
+(neighbouring crops of a slide look alike and mostly share the labels).
+
+Encoders (--configs), two kinds of config files, mixed freely:
+    trainLight.py runs     the config.yaml saved in a run folder: any model trained in vlm-tuning, built and loaded as
+                           in training (vlm_run.py; --checkpoint best by default); the embedding is model.encode_image,
+                           the image side of the aligned space (with DualEncoder 'max' pooling, the mean of its query
+                           outputs); images as in validation (crop_transform); --pooling global only
+    geo encoder configs    (encoder section, geo/model/encoder.encoder_factory of the dinov3 repository, the parent of
+                           vlm-tuning): the encoders FossilVL uses, e.g. DINOv3 (HuggingFace), Fossil (DINOv3 SSL
+                           checkpoint of this project), off-the-shelf DINOtxt and CLIP (examples in encoders/); relative
+                           paths in them (e.g. Fossil's encoder.config_path) are relative to the dinov3 repository
+Embeddings of geo encoders:
+    --pooling global       the encoder's own image vector (return_grid=False): CLS for DINOv3/Fossil, CLS or CLS + mean
+                           patch for DINOtxt (encoder.average_patch), the aligned head output for DualEncoder
+    --pooling mean         mean of the grid tokens (return_grid=True: patch tokens, or the Q-Former query outputs)
+    --pooling global+mean  both, concatenated (each normalised first)
+
+Images are center crops of --size pixels at their native resolution (the standardized px per mm is kept; as
+Fossil.preprocess and crop_transform, the order used in training), the same crop for every encoder; images whose
+shorter side is smaller are skipped. CLIP of geo configs uses its own preprocessing (224 px).
+
+Usage (from vlm-tuning; --input defaults to geo/eval/conv_test.json of the dinov3 repository):
+    python retrieval/image_retrieval.py \
+        --configs retrieval/encoders/dinov3.yaml retrieval/encoders/fossil.yaml <run>/config.yaml
+    python retrieval/image_retrieval.py --configs <run1>/config.yaml <run2>/config.yaml --checkpoint last
+"""
+import json
+import os
+import sys
+from argparse import ArgumentParser
+from collections import defaultdict
+
+import numpy as np
+import torch
+from omegaconf import OmegaConf
+from PIL import Image, ImageFile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from common import DEFAULT_INPUT, METRICS, REPO, image_path, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402
+
+# geo's encoders: geo/model/encoder.py imports its siblings directly and geo.model.* from the dinov3 repository. Last
+# on the path, so vlm-tuning's modules of the same names (model/loratorch_utils.py) win; geo itself is left out (its
+# dataset.py and model/ would shadow vlm-tuning's dataset and model packages)
+sys.path += [os.path.join(REPO, 'geo', 'model'), REPO]
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+# ------------------------------------------------------------------------------------------------------------ data
+
+def load_items(path, root, campos=None, groups=None, min_size=None):
+    """Distinct (image, labels) pairs per campo: {campo: [dict(image, slide, key, labels)]}, and the number of images
+    skipped for being smaller than min_size."""
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    seen, items, small = set(), defaultdict(list), set()
+    for sample in data:
+        campo = sample.get('campo')
+        if campos and campo not in campos:
+            continue
+        if groups and sample.get('user_group') not in groups:
+            continue
+        if not sample.get('labels'):
+            continue
+        labels = normalize_labels(sample['labels'])
+        if not labels:
+            continue
+        image = image_path(root, sample)
+        if min_size and sample.get('size') is not None and sample['size'] < min_size:
+            small.add(image)
+            continue
+        key = json.dumps(labels, ensure_ascii=False, sort_keys=True)
+        if (campo, image, key) in seen:
+            continue
+        seen.add((campo, image, key))
+        items[campo].append({'image': image, 'slide': sample.get('slide_id'), 'key': key,
+                             'labels': {(c, v) for c, vs in labels.items() for v in vs}})
+    return dict(items), len(small)
+
+
+def exclusion_mask(items, same_slide):
+    """[n, n] pairs left out of the rankings: the same image (other labels), and with same_slide the same slide."""
+    images = np.array([it['image'] for it in items])
+    mask = images[:, None] == images[None, :]
+    if same_slide:
+        slides = np.array([str(it['slide']) for it in items])
+        known = np.array([it['slide'] is not None for it in items])
+        mask |= (slides[:, None] == slides[None, :]) & known[:, None] & known[None, :]
+    return mask
+
+
+class Images(torch.utils.data.Dataset):
+    def __init__(self, paths, transform):
+        self.paths, self.transform = paths, transform
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, i):
+        with Image.open(self.paths[i]) as image:
+            return self.transform(image.convert('RGB'))
+
+
+class Crop:
+    """Center crop of size pixels at native resolution, normalised (Fossil.preprocess, crop_center=True)."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def __call__(self, image):
+        from encoder import Fossil
+        return Fossil.preprocess(None, image, self.size)
+
+
+# -------------------------------------------------------------------------------------------------------- encoders
+
+class RunEncoder(torch.nn.Module):
+    """Image side of a trainLight.py run with the interface of geo's encoders (forward(x, return_grid))."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x, return_grid):
+        if return_grid:
+            raise ValueError('trainLight.py runs embed images with model.encode_image only, use --pooling global')
+        from vlm_run import pool_queries
+        # [n, k, d] with DualEncoder 'max' pooling: one vector per image, the mean of the query outputs
+        return pool_queries(torch.nn.functional.normalize(self.model.encode_image(x).float(), dim=-1))
+
+
+def is_run(path):
+    from vlm_run import is_run_config
+    return is_run_config(OmegaConf.load(path))
+
+
+def build_encoder(path, overrides, device, checkpoint='best'):
+    if is_run(path):
+        from vlm_run import load_run
+        model, conf = load_run(path, overrides, checkpoint, device)
+        return RunEncoder(model), conf
+
+    from encoder import encoder_factory
+    conf = OmegaConf.merge(OmegaConf.load(path), OmegaConf.from_dotlist(overrides))
+    # relative paths of geo configs are relative to the dinov3 repository
+    for key in ('config_path', 'weight_path'):
+        value = conf.encoder.get(key)
+        if value and not os.path.isabs(value) and os.path.exists(os.path.join(REPO, value)):
+            conf.encoder[key] = os.path.join(REPO, value)
+    encoder = encoder_factory(conf).to(device).eval()
+    return encoder, conf
+
+
+def model_dtype(encoder):
+    return next(p for p in encoder.parameters() if p.is_floating_point()).dtype
+
+
+@torch.no_grad()
+def encode(encoder, paths, size, pooling, device, batch_size, workers, bf16):
+    is_clip = type(encoder).__name__ == 'CLIP'
+    if is_clip and pooling != 'global':
+        raise ValueError('CLIP has no grid output, use --pooling global')
+    if isinstance(encoder, RunEncoder):
+        from vlm_run import RunImages
+        dataset = RunImages(paths, size)  # crop_transform, as in the run's validation
+    else:
+        dataset = Images(paths, encoder._preprocess if is_clip else Crop(size))
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=workers)
+    dtype = model_dtype(encoder)
+    out = []
+    for i, x in enumerate(loader):
+        x = x.to(device, dtype=dtype)
+        with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16, enabled=bf16):
+            parts = []
+            if pooling in ('global', 'global+mean'):
+                parts.append(encoder(x, return_grid=False))
+            if pooling in ('mean', 'global+mean'):
+                parts.append(encoder(x, return_grid=True).mean(1))
+        parts = [torch.nn.functional.normalize(p.float(), dim=-1) for p in parts]
+        out.append(torch.cat(parts, -1).cpu())
+        if i % 20 == 0:
+            print(f'  {min((i + 1) * batch_size, len(paths))}/{len(paths)} images')
+    return torch.cat(out).numpy()
+
+
+# ---------------------------------------------------------------------------------------------------------- report
+
+def report(results, campos):
+    lines = ['| encoder | campo | R@1 | R@5 | R@10 | mAP | nDCG@10 (Jaccard) | queries / images |', '|---' * 8 + '|']
+    for name, per_campo in results.items():
+        for campo in campos + ['mean']:
+            m = per_campo.get(campo)
+            if m:
+                count = f"{m['queries']} / {m['items']}" if 'queries' in m else ''
+                lines.append(f"| {name} | {campo} | {m['R@1']:.3f} | {m['R@5']:.3f} | {m['R@10']:.3f} | {m['mAP']:.3f} "
+                             f"| {m['nDCG@10']:.3f} | {count} |")
+    return '\n'.join(lines)
+
+
+if __name__ == '__main__':
+    parser = ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('--input', default=DEFAULT_INPUT, help='split json with the samples and labels')
+    parser.add_argument('--root', default=None, help='image folder (default: data.root of the first config)')
+    parser.add_argument('--configs', nargs='+', required=True, help='trainLight.py run configs and/or geo encoder configs, one per encoder')
+    parser.add_argument('--names', nargs='+', default=None, help='encoder names in the results (default: run folder or config names)')
+    parser.add_argument('--set', nargs='*', default=[], help='config overrides applied to every encoder, KEY=VALUE')
+    parser.add_argument('--checkpoint', default='best', help='runs: best, last, none (the starting model) or a checkpoint path, see vlm_run.py')
+    parser.add_argument('--campos', nargs='+', default=['composition', 'texture', 'porosity', 'diagenesis'])
+    parser.add_argument('--groups', nargs='+', type=int, default=None, help='user groups kept (default: all)')
+    parser.add_argument('--size', type=int, default=256, help='center crop side in pixels (smaller images skipped)')
+    parser.add_argument('--pooling', choices=['global', 'mean', 'global+mean'], default='global')
+    parser.add_argument('--exclude_same_slide', action='store_true', help='leave out images of the query slide')
+    parser.add_argument('--random', action='store_true', help='add a random-embedding baseline')
+    parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
+    parser.add_argument('--batch_size', default=32, type=int)
+    parser.add_argument('--workers', default=4, type=int)
+    parser.add_argument('--bf16', action='store_true', help='autocast the encoders to bfloat16')
+    parser.add_argument('--out', default=None, help='json with the results (default: <input>_image_retrieval.json)')
+    args = parser.parse_args()
+
+    def default_name(config):
+        conf = OmegaConf.load(config)
+        if is_run(config):
+            return os.path.basename(os.path.normpath(conf.output_dir))
+        return os.path.splitext(os.path.basename(config))[0]
+
+    def config_root(config):
+        conf = OmegaConf.load(config)
+        return conf.dataset.get('root') if is_run(config) else conf.get('data', {}).get('root')
+
+    names = args.names or [default_name(c) for c in args.configs]
+    if len(names) != len(args.configs) or len(set(names)) != len(names):
+        raise ValueError('--names: one distinct name per config')
+    broken = [s for s in args.set if '=' not in s]
+    if broken:
+        raise ValueError(f'--set entries must be KEY=VALUE, got {broken}')
+    root = args.root or config_root(args.configs[0])
+    if not root:
+        raise ValueError('--root: image folder (the first config has no data.root)')
+
+    items, small = load_items(args.input, root, args.campos, args.groups, args.size)
+    campos = [c for c in args.campos if c in items]
+    print(f'images from {root}; {small} images smaller than {args.size} px skipped')
+    jaccard, exclude = {}, {}
+    for campo in campos:
+        keys = [it['key'] for it in items[campo]]
+        jaccard[campo] = jaccard_matrix([it['labels'] for it in items[campo]])
+        exclude[campo] = exclusion_mask(items[campo], args.exclude_same_slide)
+        print(f'{campo}: {len(keys)} images, {len(set(keys))} label combinations')
+    paths = sorted({it['image'] for campo in campos for it in items[campo]})
+    index = {p: i for i, p in enumerate(paths)}
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        raise FileNotFoundError(f'{len(missing)} images not found, e.g. {missing[:3]}')
+
+    def evaluate(embeddings):
+        out = {}
+        for campo in campos:
+            rows = [index[it['image']] for it in items[campo]]
+            m = retrieval_metrics(embeddings[rows], [it['key'] for it in items[campo]], jaccard[campo], exclude[campo])
+            out[campo] = m
+            print(f"  {campo:12s} R@1 {m['R@1']:.3f} R@5 {m['R@5']:.3f} R@10 {m['R@10']:.3f} mAP {m['mAP']:.3f} "
+                  f"nDCG@10 {m['nDCG@10']:.3f} ({m['queries']} queries / {m['items']} images)")
+        out['mean'] = {k: float(np.mean([out[c][k] for c in campos])) for k in METRICS}
+        return out
+
+    results, weights = {}, {}
+    if args.random:
+        print('\n=== random')
+        results['random'] = evaluate(np.random.default_rng(0).standard_normal((len(paths), 256)).astype(np.float32))
+
+    for name, config in zip(names, args.configs):
+        print(f'\n=== {name} ({config})')
+        encoder, conf = build_encoder(config, args.set, args.device, args.checkpoint)
+        if isinstance(encoder, RunEncoder):
+            weights[name] = conf.model.load_weights
+        embeddings = encode(encoder, paths, args.size, args.pooling, args.device, args.batch_size, args.workers,
+                            args.bf16)
+        print(f'  {embeddings.shape[1]}-d embeddings')
+        results[name] = evaluate(embeddings)
+        del encoder
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    print('\n' + report(results, campos))
+    out = args.out or os.path.splitext(args.input)[0] + '_image_retrieval.json'
+    settings = {k: getattr(args, k) for k in ('input', 'root', 'configs', 'set', 'checkpoint', 'groups', 'size',
+                                              'pooling', 'exclude_same_slide')}
+    settings['weights'] = weights  # checkpoint loaded for each run
+    with open(out, 'w', encoding='utf-8') as f:
+        json.dump({'settings': settings, 'results': results}, f, indent=2)
+    print(f'\nsaved to {out}')
