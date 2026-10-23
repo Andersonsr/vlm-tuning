@@ -17,24 +17,22 @@ Encoders (--configs), two kinds of config files, mixed freely:
                            in training (vlm_run.py; --checkpoint best by default); the embedding is model.encode_image,
                            the image side of the aligned space (with DualEncoder 'max' pooling, the mean of its query
                            outputs); images as in validation (crop_transform); --pooling global only
-    geo encoder configs    (encoder section, geo/model/encoder.encoder_factory of the dinov3 repository, the parent of
-                           vlm-tuning): the encoders FossilVL uses, e.g. DINOv3 (HuggingFace), Fossil (DINOv3 SSL
-                           checkpoint of this project), off-the-shelf DINOtxt and CLIP (examples in encoders/); relative
-                           paths in them (e.g. Fossil's encoder.config_path) are relative to the dinov3 repository
-Embeddings of geo encoders:
+    encoder configs        (encoder section, baselines.py): off-the-shelf encoders, DINOv3 (HuggingFace), Fossil (DINOv3
+                           SSL checkpoint of this project), DINOtxt and CLIP (examples in encoders/)
+Embeddings of encoder configs:
     --pooling global       the encoder's own image vector (return_grid=False): CLS for DINOv3/Fossil, CLS or CLS + mean
                            patch for DINOtxt (encoder.average_patch), the aligned head output for DualEncoder
     --pooling mean         mean of the grid tokens (return_grid=True: patch tokens, or the Q-Former query outputs)
     --pooling global+mean  both, concatenated (each normalised first)
 
 Images are center crops of --size pixels at their native resolution (the standardized px per mm is kept; as
-Fossil.preprocess and crop_transform, the order used in training), the same crop for every encoder; images whose
-shorter side is smaller are skipped. CLIP of geo configs uses its own preprocessing (224 px).
+crop_transform, the order used in training), the same crop for every encoder; images whose shorter side is smaller
+are skipped. CLIP uses its own preprocessing (224 px).
 
-Usage (from vlm-tuning; --input defaults to geo/eval/conv_test.json of the dinov3 repository):
-    python retrieval/image_retrieval.py \
+Usage (from vlm-tuning; --input: split json with the samples and their labels, e.g. conv_test.json):
+    python retrieval/image_retrieval.py --input conv_test.json \
         --configs retrieval/encoders/dinov3.yaml retrieval/encoders/fossil.yaml <run>/config.yaml
-    python retrieval/image_retrieval.py --configs <run1>/config.yaml <run2>/config.yaml --checkpoint last
+    python retrieval/image_retrieval.py --input conv_test.json --configs <run1>/config.yaml <run2>/config.yaml --checkpoint last
 """
 import json
 import os
@@ -49,12 +47,7 @@ from PIL import Image, ImageFile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import DEFAULT_INPUT, METRICS, REPO, image_path, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402
-
-# geo's encoders: geo/model/encoder.py imports its siblings directly and geo.model.* from the dinov3 repository. Last
-# on the path, so vlm-tuning's modules of the same names (model/loratorch_utils.py) win; geo itself is left out (its
-# dataset.py and model/ would shadow vlm-tuning's dataset and model packages)
-sys.path += [os.path.join(REPO, 'geo', 'model'), REPO]
+from common import METRICS, image_path, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -115,20 +108,26 @@ class Images(torch.utils.data.Dataset):
 
 
 class Crop:
-    """Center crop of size pixels at native resolution, normalised (Fossil.preprocess, crop_center=True)."""
+    """Center crop of size pixels at native resolution, normalised with the ImageNet statistics (crop_transform); an
+    image whose shorter side is smaller is enlarged to it first."""
 
     def __init__(self, size):
         self.size = size
 
     def __call__(self, image):
-        from encoder import Fossil
-        return Fossil.preprocess(None, image, self.size)
+        import torchvision.transforms.functional as TF
+        if min(image.size) < self.size:
+            image = TF.resize(image, self.size)
+        w, h = image.size
+        left, top = w // 2 - self.size // 2, h // 2 - self.size // 2
+        x = TF.to_tensor(image.crop((left, top, left + self.size, top + self.size)))
+        return TF.normalize(x, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
 
 
 # -------------------------------------------------------------------------------------------------------- encoders
 
 class RunEncoder(torch.nn.Module):
-    """Image side of a trainLight.py run with the interface of geo's encoders (forward(x, return_grid))."""
+    """Image side of a trainLight.py run with the interface of the baselines (forward(x, return_grid))."""
 
     def __init__(self, model):
         super().__init__()
@@ -153,15 +152,10 @@ def build_encoder(path, overrides, device, checkpoint='best'):
         model, conf = load_run(path, overrides, checkpoint, device)
         return RunEncoder(model), conf
 
-    from encoder import encoder_factory
+    import vlm_run  # noqa: F401  vlm-tuning's packages on the path
+    from baselines import build_baseline
     conf = OmegaConf.merge(OmegaConf.load(path), OmegaConf.from_dotlist(overrides))
-    # relative paths of geo configs are relative to the dinov3 repository
-    for key in ('config_path', 'weight_path'):
-        value = conf.encoder.get(key)
-        if value and not os.path.isabs(value) and os.path.exists(os.path.join(REPO, value)):
-            conf.encoder[key] = os.path.join(REPO, value)
-    encoder = encoder_factory(conf).to(device).eval()
-    return encoder, conf
+    return build_baseline(conf).to(device).eval(), conf
 
 
 def model_dtype(encoder):
@@ -212,9 +206,9 @@ def report(results, campos):
 
 if __name__ == '__main__':
     parser = ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('--input', default=DEFAULT_INPUT, help='split json with the samples and labels')
+    parser.add_argument('--input', required=True, help='split json with the samples and labels (e.g. conv_test.json)')
     parser.add_argument('--root', default=None, help='image folder (default: data.root of the first config)')
-    parser.add_argument('--configs', nargs='+', required=True, help='trainLight.py run configs and/or geo encoder configs, one per encoder')
+    parser.add_argument('--configs', nargs='+', required=True, help='trainLight.py run configs and/or encoder configs (encoders/), one per encoder')
     parser.add_argument('--names', nargs='+', default=None, help='encoder names in the results (default: run folder or config names)')
     parser.add_argument('--set', nargs='*', default=[], help='config overrides applied to every encoder, KEY=VALUE')
     parser.add_argument('--checkpoint', default='best', help='runs: best, last, none (the starting model) or a checkpoint path, see vlm_run.py')

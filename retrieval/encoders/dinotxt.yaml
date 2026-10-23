@@ -1,11 +1,11 @@
-# off-the-shelf DINO-TXT vision tower (DINOv3 ViT-L backbone + DINO-TXT's vision head); config_path '' loads no
-# vlm-tuning run. average_patch: true gives DINO-TXT's own 2048-d embedding (CLS + mean patch), false the CLS half
+# off-the-shelf DINO-TXT vision tower (DINOv3 ViT-L backbone + DINO-TXT's vision head). average_patch: true gives
+# DINO-TXT's own 2048-d embedding (CLS + mean patch), false the CLS half. Trained DINOtxt runs: use their config.yaml
 encoder:
   name: 'DINOtxt'
-  config_path: ''  # or a vlm-tuning DINOtxt run's config.yaml to evaluate that run
-  weight_path: ''
   dinotxt_weights: '/nethome/recpinfo/users/fibz/cache/dinov3_vitl16_dinotxt.pth'
+  backbone_weights: ''  # optional DINOv3 SSL checkpoint replacing DINO-TXT's backbone (encoder.branch: teacher/student)
   average_patch: true
-  size: [256, 512]
+  hub_repo: facebookresearch/dinov3  # or a local clone of the DINOv3 code with hub_source: local
+  hub_source: github
 data:
   root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images/'

@@ -12,21 +12,17 @@ import os
 
 import numpy as np
 
-# the dinov3 repository (parent of vlm-tuning): geo, its split jsons and the torch hub entry points
-REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-DEFAULT_INPUT = os.path.join(REPO, 'geo', 'eval', 'conv_test.json')
 KS = (1, 5, 10)
 METRICS = ('R@1', 'R@5', 'R@10', 'mAP', 'nDCG@10')
 
 
 def normalize_labels(labels):
-    """Stripped, deduplicated and sorted values; categories without values dropped (as geo/eval/judge_reliability)."""
+    """Stripped, deduplicated and sorted values; categories without values dropped."""
     labels = {c: sorted({v.strip() for v in vs if v.strip()}) for c, vs in labels.items()}
     return {c: vs for c, vs in labels.items() if vs}
 
 
 def image_path(root, sample):
-    # as geo dataset.ConversationDataset
     if 'cd_guid' in sample:
         return os.path.join(root, '{}.png'.format(sample['cd_guid']))
     if 'image_name' in sample:

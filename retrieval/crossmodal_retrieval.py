@@ -17,9 +17,9 @@ Models: any run of trainLight.py (--configs, the config.yaml saved in each run f
 training (vlm_run.py; --checkpoint best by default). Images are center crops of --size pixels at their native
 resolution (crop_transform, as in validation); images whose shorter side is smaller are skipped.
 
-Usage (from vlm-tuning; --input defaults to geo/eval/conv_test.json of the dinov3 repository):
-    python retrieval/crossmodal_retrieval.py --configs <run>/config.yaml
-    python retrieval/crossmodal_retrieval.py --configs <run1>/config.yaml <run2>/config.yaml --directions i2t t2i \\
+Usage (from vlm-tuning; --input: split json with the samples and their labels, e.g. conv_test.json):
+    python retrieval/crossmodal_retrieval.py --input conv_test.json --configs <run>/config.yaml
+    python retrieval/crossmodal_retrieval.py --input conv_test.json --configs <run1>/config.yaml <run2>/config.yaml --directions i2t t2i \\
         --exclude_same_slide --random
 """
 import json
@@ -34,7 +34,7 @@ from omegaconf import OmegaConf
 from lightning.pytorch import seed_everything
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import DEFAULT_INPUT, METRICS, image_path, jaccard_matrix, normalize_labels, ranking_metrics  # noqa: E402
+from common import METRICS, image_path, jaccard_matrix, normalize_labels, ranking_metrics  # noqa: E402
 from vlm_run import encode_images, encode_texts, load_run, pairwise_similarity, run_name  # noqa: E402
 from dataset.datasets import GEO_INDICES  # noqa: E402
 
@@ -103,7 +103,7 @@ if __name__ == '__main__':
     parser.add_argument('--names', nargs='+', default=None, help='model names in the results (default: run folder names)')
     parser.add_argument('--set', nargs='*', default=[], help='config overrides applied to every run, KEY=VALUE')
     parser.add_argument('--checkpoint', default='best', help='best, last, none (the starting model) or a checkpoint path, see vlm_run.py')
-    parser.add_argument('--input', default=DEFAULT_INPUT, help='split json with the samples and labels')
+    parser.add_argument('--input', required=True, help='split json with the samples and labels (e.g. conv_test.json)')
     parser.add_argument('--root', default=None, help='image folder (default: dataset.root of the first run)')
     parser.add_argument('--campos', nargs='+', default=None, help='default: the geo_index_val of the first run')
     parser.add_argument('--groups', nargs='+', type=int, default=None, help='user groups kept (default: all, as the single modality tests)')

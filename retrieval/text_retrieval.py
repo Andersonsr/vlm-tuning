@@ -14,7 +14,7 @@ Encoders (--models), as <kind>:<name>:
     hf:<model or preset>   HuggingFace encoder; presets set the pooling and prefix each model expects (see PRESETS),
                            any other model id uses mean pooling
     clip:<name>            OpenAI CLIP text tower (clip package), 77 tokens
-    dinotxt:<weights.pth>  DINO-TXT text tower (torch hub of this repository; --bpe for the tokenizer vocabulary)
+    dinotxt:<weights.pth>  DINO-TXT text tower (torch hub, --hub_repo/--hub_source; --bpe for the tokenizer vocabulary)
     jina[:<model>]         jina-clip-v2 text tower (default jinaai/jina-clip-v2), descriptions as they are;
     jina-query[:<model>]   the same with jina's retrieval query instruction (both need transformers 4.x and einops)
     vlm:<run config.yaml>  text side of a trainLight.py run (the config.yaml saved in its folder): any model trained in
@@ -22,10 +22,10 @@ Encoders (--models), as <kind>:<name>:
                            its own tokenizer and model.encode_text (the aligned text embedding)
     tfidf, random          lexical and chance baselines
 
-Usage (from vlm-tuning; --input defaults to geo/eval/conv_test.json of the dinov3 repository):
-    python retrieval/text_retrieval.py --models tfidf random hf:bertimbau-base hf:e5-base
-    python retrieval/text_retrieval.py --input ../geo/eval/conv_val.json --campos composition texture --models hf:bge-m3
-    python retrieval/text_retrieval.py --models hf:e5-large vlm:<run>/config.yaml --checkpoint last
+Usage (from vlm-tuning; --input: split json with the conversations and their labels, e.g. conv_test.json):
+    python retrieval/text_retrieval.py --input conv_test.json --models tfidf random hf:bertimbau-base hf:e5-base
+    python retrieval/text_retrieval.py --input conv_val.json --campos composition texture --models hf:bge-m3
+    python retrieval/text_retrieval.py --input conv_test.json --models hf:e5-large vlm:<run>/config.yaml --checkpoint last
 """
 import json
 import math
@@ -38,7 +38,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import DEFAULT_INPUT, KS, REPO, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402,F401
+from common import KS, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402,F401
 
 # name -> (model id, pooling, prefix); pooling: mean, cls or last (last non-padding token, decoder embedders)
 PRESETS = {
@@ -136,12 +136,12 @@ class CLIPEncoder:
 
 
 class DINOTxtEncoder:
-    def __init__(self, weights, device, batch_size, bpe=None):
+    def __init__(self, weights, device, batch_size, bpe=None, hub_repo='facebookresearch/dinov3', hub_source='github'):
         # pretrained=False: the vision backbone is not needed here, only the text tower is loaded from `weights`
         kwargs = {'pretrained': False}
         if bpe:
             kwargs['bpe_path_or_url'] = bpe
-        model, self.tokenizer = torch.hub.load(REPO, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source='local', **kwargs)
+        model, self.tokenizer = torch.hub.load(hub_repo, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source=hub_source, **kwargs)
         state = torch.load(weights, map_location='cpu')
         state = state.get('model', state.get('state_dict', state))
         text_keys = [k for k in model.state_dict() if k.startswith('text_model.')]
@@ -226,7 +226,7 @@ def build_encoder(spec, args):
     if kind == 'clip':
         return CLIPEncoder(name, args.device, args.batch_size)
     if kind == 'dinotxt':
-        return DINOTxtEncoder(name, args.device, args.batch_size, args.bpe)
+        return DINOTxtEncoder(name, args.device, args.batch_size, args.bpe, args.hub_repo, args.hub_source)
     if kind in ('jina', 'jina-query'):
         return JinaEncoder(name or 'jinaai/jina-clip-v2', args.device, args.batch_size, args.max_length,
                            task='retrieval.query' if kind == 'jina-query' else None)
@@ -252,7 +252,7 @@ def report(results, campos):
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument('--input', default=DEFAULT_INPUT, help='split json with conversations and labels')
+    parser.add_argument('--input', required=True, help='split json with conversations and labels (e.g. conv_test.json)')
     parser.add_argument('--campos', nargs='+', default=['composition', 'texture', 'porosity', 'diagenesis'],
                         help='description types (classification has only 8 distinct descriptions)')
     parser.add_argument('--models', nargs='+', default=['random', 'tfidf', 'hf:bertimbau-base', 'hf:mpnet-multilingual',
@@ -262,6 +262,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_length', default=None, type=int, help='token limit of hf encoders (default: the model\'s)')
     parser.add_argument('--checkpoint', default='best', help='vlm: runs: best, last, none (the starting model) or a checkpoint path, see vlm_run.py')
     parser.add_argument('--bpe', default=None, help='BPE vocabulary for dinotxt (default: downloaded)')
+    parser.add_argument('--hub_repo', default='facebookresearch/dinov3', help='dinotxt: torch hub repo of the DINOv3 code (or a local clone)')
+    parser.add_argument('--hub_source', default='github', choices=['github', 'local'])
     parser.add_argument('--out', default=None, help='json with the results (default: <input>_text_retrieval.json)')
     args = parser.parse_args()
 

@@ -20,8 +20,7 @@ from omegaconf import OmegaConf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VLM = os.path.dirname(HERE)
-# vlm-tuning's packages (dataset, model) and model/ itself, which its modules import from directly, before any other
-# folder with the same module names (geo's dataset.py, model/ and model/loratorch_utils.py)
+# vlm-tuning's packages (dataset, model) and model/ itself, which its modules import from directly, first on the path
 for path in (os.path.join(VLM, 'model'), VLM):
     if path in sys.path:
         sys.path.remove(path)
@@ -36,7 +35,7 @@ CHECKPOINTS = ('best', 'last', 'none')
 
 
 def is_run_config(conf):
-    """A trainLight.py run config (model and dataset sections), not a geo encoder config (encoder section)."""
+    """A trainLight.py run config (model and dataset sections), not an encoder config (encoder section, baselines.py)."""
     return 'model' in conf and 'dataset' in conf and 'encoder' not in conf
 
 
