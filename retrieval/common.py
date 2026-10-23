@@ -84,5 +84,10 @@ def retrieval_metrics(embeddings, keys, jaccard, exclude=None):
     further pairs left out of each query's ranking (e.g. the same image under other labels, or images of the same
     slide); the query itself is always left out."""
     x = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True).clip(min=1e-12)
+    return similarity_metrics(x @ x.T, keys, jaccard, exclude)
+
+
+def similarity_metrics(sim, keys, jaccard, exclude=None):
+    """retrieval_metrics from a precomputed [n, n] similarity of the items (e.g. best query-to-query match)."""
     excluded = np.eye(len(keys), dtype=bool) if exclude is None else (exclude | np.eye(len(keys), dtype=bool))
-    return ranking_metrics(x @ x.T, keys, keys, jaccard, excluded)
+    return ranking_metrics(sim, keys, keys, jaccard, excluded)

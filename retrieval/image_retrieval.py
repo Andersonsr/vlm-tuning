@@ -15,8 +15,10 @@ of its rankings, since its embedding is identical. --exclude_same_slide also lea
 Encoders (--configs), two kinds of config files, mixed freely:
     trainLight.py runs     the config.yaml saved in a run folder: any model trained in vlm-tuning, built and loaded as
                            in training (vlm_run.py; --checkpoint best by default); the embedding is model.encode_image,
-                           the image side of the aligned space (with DualEncoder 'max' pooling, the mean of its query
-                           outputs); images as in validation (crop_transform); --pooling global only
+                           the image side of the aligned space; images as in validation (crop_transform); --pooling
+                           global only. Runs trained with DualEncoder 'max' pooling keep their k query outputs per
+                           image, and the similarity of two images is their best query-to-query match (the highest
+                           cosine over the k x k query pairs), as each text is matched by its closest query in training
     encoder configs        (encoder section, baselines.py): off-the-shelf encoders, DINOv3 (HuggingFace), Fossil (DINOv3
                            SSL checkpoint of this project), DINOtxt and CLIP (examples in encoders/)
 Embeddings of encoder configs:
@@ -47,7 +49,8 @@ from PIL import Image, ImageFile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from common import METRICS, image_path, jaccard_matrix, normalize_labels, retrieval_metrics  # noqa: E402
+from common import (METRICS, image_path, jaccard_matrix, normalize_labels, retrieval_metrics,  # noqa: E402
+                    similarity_metrics)
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -136,9 +139,22 @@ class RunEncoder(torch.nn.Module):
     def forward(self, x, return_grid):
         if return_grid:
             raise ValueError('trainLight.py runs embed images with model.encode_image only, use --pooling global')
-        from vlm_run import pool_queries
-        # [n, k, d] with DualEncoder 'max' pooling: one vector per image, the mean of the query outputs
-        return pool_queries(torch.nn.functional.normalize(self.model.encode_image(x).float(), dim=-1))
+        return self.model.encode_image(x)  # [n, k, d] with DualEncoder 'max' pooling: every query output
+
+
+@torch.no_grad()
+def query_match_similarity(features, device, chunk=16):
+    """[n, n] best query-to-query match of normalised query outputs [n, k, d]: the highest cosine over the k x k
+    query pairs of each two images. chunk images at a time ([chunk * k, n * k] similarities in memory)."""
+    n, k, _ = features.shape
+    gallery = features.reshape(n * k, -1).to(device)
+    sim = torch.empty(n, n)
+    for start in range(0, n, chunk):
+        block = features[start:start + chunk].to(device)
+        b = block.shape[0]
+        pairs = (block.reshape(b * k, -1) @ gallery.T).reshape(b, k, n, k)
+        sim[start:start + b] = pairs.amax(dim=(1, 3)).cpu()
+    return sim.numpy()
 
 
 def is_run(path):
@@ -261,17 +277,23 @@ if __name__ == '__main__':
         raise FileNotFoundError(f'{len(missing)} images not found, e.g. {missing[:3]}')
 
     def evaluate(embeddings):
+        """embeddings [n, d] (cosine), or [n, k, d] query outputs of 'max' pooling runs (best query-to-query match)."""
         out = {}
         for campo in campos:
             rows = [index[it['image']] for it in items[campo]]
-            m = retrieval_metrics(embeddings[rows], [it['key'] for it in items[campo]], jaccard[campo], exclude[campo])
+            keys = [it['key'] for it in items[campo]]
+            if embeddings.ndim == 3:
+                sim = query_match_similarity(torch.from_numpy(embeddings[rows]), args.device)
+                m = similarity_metrics(sim, keys, jaccard[campo], exclude[campo])
+            else:
+                m = retrieval_metrics(embeddings[rows], keys, jaccard[campo], exclude[campo])
             out[campo] = m
             print(f"  {campo:12s} R@1 {m['R@1']:.3f} R@5 {m['R@5']:.3f} R@10 {m['R@10']:.3f} mAP {m['mAP']:.3f} "
                   f"nDCG@10 {m['nDCG@10']:.3f} ({m['queries']} queries / {m['items']} images)")
         out['mean'] = {k: float(np.mean([out[c][k] for c in campos])) for k in METRICS}
         return out
 
-    results, weights = {}, {}
+    results, weights, similarity = {}, {}, {}
     if args.random:
         print('\n=== random')
         results['random'] = evaluate(np.random.default_rng(0).standard_normal((len(paths), 256)).astype(np.float32))
@@ -283,7 +305,12 @@ if __name__ == '__main__':
             weights[name] = conf.model.load_weights
         embeddings = encode(encoder, paths, args.size, args.pooling, args.device, args.batch_size, args.workers,
                             args.bf16)
-        print(f'  {embeddings.shape[1]}-d embeddings')
+        if embeddings.ndim == 3:
+            similarity[name] = 'best query-to-query match'
+            print(f'  {embeddings.shape[1]} query outputs of {embeddings.shape[2]}-d per image, best query-to-query match')
+        else:
+            similarity[name] = 'cosine'
+            print(f'  {embeddings.shape[1]}-d embeddings')
         results[name] = evaluate(embeddings)
         del encoder
         if torch.cuda.is_available():
@@ -294,6 +321,7 @@ if __name__ == '__main__':
     settings = {k: getattr(args, k) for k in ('input', 'root', 'configs', 'set', 'checkpoint', 'groups', 'size',
                                               'pooling', 'exclude_same_slide')}
     settings['weights'] = weights  # checkpoint loaded for each run
+    settings['similarity'] = similarity
     with open(out, 'w', encoding='utf-8') as f:
         json.dump({'settings': settings, 'results': results}, f, indent=2)
     print(f'\nsaved to {out}')
