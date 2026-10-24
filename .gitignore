@@ -15,7 +15,6 @@ LongCLIP/
 .vscode
 tt.py
 *.png
-*.sh
 *.xlsx
 *.json
 idealTemperatureTest.py
