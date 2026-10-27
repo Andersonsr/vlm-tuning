@@ -41,6 +41,7 @@ import os
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -208,6 +209,18 @@ def encode(encoder, paths, size, pooling, device, batch_size, workers, bf16):
 
 # ---------------------------------------------------------------------------------------------------------- report
 
+def load_runs(path):
+    """Earlier executions saved in the results file: {'runs': [{time, settings, results}]}; a file of the former
+    single-execution format ({settings, results}) becomes the first run."""
+    if not os.path.isfile(path):
+        return []
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if 'runs' in data:
+        return data['runs']
+    return [{'time': None, 'settings': data['settings'], 'results': data['results']}]
+
+
 def report(results, campos):
     lines = ['| encoder | campo | R@1 | R@5 | R@10 | mAP | nDCG@10 (Jaccard) | queries / images |', '|---' * 8 + '|']
     for name, per_campo in results.items():
@@ -238,7 +251,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--workers', default=4, type=int)
     parser.add_argument('--bf16', action='store_true', help='autocast the encoders to bfloat16')
-    parser.add_argument('--out', default=None, help='json with the results (default: <input>_image_retrieval.json)')
+    parser.add_argument('--out', default=None, help='json the results are appended to, one entry per execution with its settings (default: <input>_image_retrieval.json)')
     args = parser.parse_args()
 
     def default_name(config):
@@ -322,6 +335,10 @@ if __name__ == '__main__':
                                               'pooling', 'exclude_same_slide')}
     settings['weights'] = weights  # checkpoint loaded for each run
     settings['similarity'] = similarity
-    with open(out, 'w', encoding='utf-8') as f:
-        json.dump({'settings': settings, 'results': results}, f, indent=2)
-    print(f'\nsaved to {out}')
+    runs = load_runs(out)
+    runs.append({'time': datetime.now().isoformat(timespec='seconds'), 'settings': settings, 'results': results})
+    tmp = out + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({'runs': runs}, f, indent=2)
+    os.replace(tmp, out)  # the earlier runs are not lost if writing fails
+    print(f'\nappended to {out} ({len(runs)} runs)')
