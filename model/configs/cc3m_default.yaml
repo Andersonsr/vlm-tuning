@@ -1,0 +1,55 @@
+model:
+  name: 'CLIP:ViT-B/32'
+  vision_head_only: false  # DINOtxt only (--vision_head): of the vision tower only DINO-TXT's vision head trains (backbone frozen); the text tower gets LoRA with lora.apply, else is fully fine-tuned
+  average_local: false  # DINOtxt: cls + mean patch embedding (--average_local)
+  temperature: 100
+  lora:
+    apply: false
+    r: 4
+    alpha: 8
+    dropout_rate: 0.25
+    params: ['q', 'k', 'v', 'o']
+    encoder: 'both' # both,
+    position: 'all'
+  residual_adapter:
+    apply: false
+    target: 'both' # 'vision', 'text', 'both'
+    alpha: 0.5
+    bottleneck_reduction: 4
+  calibrate: false
+  load_weights: false # false or path to file
+  train_temperature: false
+  sigmoid_bias: -10 # initial bias of the siglip loss
+  train_bias: false # learn the sigmoid bias (siglip loss only)
+train:
+  loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
+  batch_size: 256 # * n_gpus
+  gpus: 1  # gpus per node (--gpus)
+  nnodes: 1  # (--nnodes)
+  accelerator: gpu  # gpu, cpu or auto (--accelerator)
+  strategy: auto  # auto, fsdp or deepspeed_stage_2 (--strategy)
+  epochs: 10  # ~11k steps per epoch at batch 256
+  learning_rate: 0.0005  # peak learning rate (after the warm-up)
+  optimizer:  # OpenCLIP defaults
+    name: adamw  # adamw, or adam (weight decay as L2)
+    weight_decay: 0.2  # not on biases, gains/norms (1-d parameters) or the temperature
+    betas: [0.9, 0.98]
+    eps: 1.0e-6
+    schedule: cosine  # cosine (after the warm-up) or constant
+    warmup: 0.05  # fraction of the training steps when < 1 (0.05: 5%), or warm-up steps (e.g. 10000, as OpenCLIP)
+    min_lr_ratio: 0.0  # cosine decays to min_lr_ratio * learning_rate
+    head_lr: null  # learning rate of new heads (DualEncoder heads, DINOtxt vision head); null: learning_rate
+    grad_clip: null  # gradient norm clipping; null: none
+  monitor: 'val_loss'  # or 't2i r@5', 'i2t r@5' (quote names with a space: --set "train.monitor=t2i r@5")
+  multi_positive: false
+  cooling:
+    apply: false  # temperature fixed at model.temperature; or 'step', 'linear', 'cosine', 'log' (linear in log space) to cool it to final_temp
+    final_temp: 34.723667
+    iterations: 1.0 # cooling duration, total batches ratio
+dataset:
+  name: 'cc3m'
+  root: 'D:\\datasets\\cc3m'  # folder given to dataset/download_cc3m.py --out
+  num_workers: 8  # dataloader workers (decoding jpegs is the bottleneck)
+name: test  # run name (--name): the run is saved in <output_dir>/<name>, with its config.yaml
+output_dir: 'D:\\checkpoints\\test\\'
+log_interval: 100

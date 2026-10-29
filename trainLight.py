@@ -5,6 +5,7 @@ import os
 import uuid
 from collections import defaultdict
 from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES, DistributedSingleDatasetBatchSampler
+from dataset.cc3m import CC3MDataset
 from model.encoders import resize_transform, crop_transform
 import lightning as L
 from lightning.pytorch import seed_everything
@@ -46,7 +47,7 @@ DEFAULTS = {
     'train': {'nnodes': 1, 'gpus': 1, 'accelerator': 'gpu', 'strategy': 'auto', 'init_weights': None,
               'optimizer': OPTIMIZER_DEFAULTS},
     'dataset': {'multiresolution': False, 'geometric_aug': False, 'spectral_aug': False, 'p_spectral': 0.8,
-                'nlm_aug': False},
+                'nlm_aug': False, 'num_workers': 8},
 }
 
 # command line option -> config entry it sets (the options are shortcuts for --set)
@@ -225,7 +226,40 @@ if __name__ == '__main__':
     for name, n in sorted(groups.items(), key=lambda x: -x[1]):
         print(f"{n/1e6:8.3f}M  {name}")
 
-    if conf.dataset.name != 'geo':
+    if conf.dataset.name == 'cc3m':
+        train_dataset = CC3MDataset(conf.dataset.root, 'train', model.prepareImages, model.tokenize)
+        val_dataset = CC3MDataset(conf.dataset.root, 'validation', model.prepareImages, model.tokenize)
+        print('train dataset size: {} val dataset size {}'.format(len(train_dataset), len(val_dataset)))
+
+        # the sampler shards the batches over the gpus (use_distributed_sampler=False)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=DistributedSingleDatasetBatchSampler(
+                dataset_lengths=[len(train_dataset)],
+                batch_size=conf.train.batch_size,
+                shuffle=True,
+                drop_last=True,
+            ),
+            collate_fn=train_dataset.collate,
+            num_workers=conf.dataset.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_sampler=DistributedSingleDatasetBatchSampler(
+                dataset_lengths=[len(val_dataset)],
+                batch_size=conf.train.batch_size,
+                shuffle=False,
+                drop_last=False,  # every validation sample
+            ),
+            collate_fn=val_dataset.collate,
+            num_workers=conf.dataset.num_workers,
+            pin_memory=True,
+            persistent_workers=True,
+        )
+
+    elif conf.dataset.name != 'geo':
         train_dataset = CaptionDataset(
             conf.dataset.root, 
             conf.dataset.train_annotation, 
