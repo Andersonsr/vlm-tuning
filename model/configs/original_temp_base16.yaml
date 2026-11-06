@@ -24,7 +24,7 @@ model:
   sigmoid_bias: -10 # initial bias of the siglip loss
   train_bias: false # learn the sigmoid bias (siglip loss only)
 train:
-  loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
+  loss: 'contrastive' # 'contrastive' (CLIP softmax), 'siglip' (sigmoid) or 'clip_refine' (RaFA + HyCD, train.clip_refine: alpha 0.5, temperature 1.0)
   batch_size: 128
   gpus: 1  # gpus per node (--gpus)
   nnodes: 1  # (--nnodes)
@@ -51,16 +51,16 @@ train:
 dataset:
   name: 'nwpu'
   multiresolution: false  # geo: train and validate on both resolutions (--multiresolution)
-  root: '/nethome/recpinfo/users/fibz/data/dataset/nwpu/'
+  root: '/path/to/cluster_home/data/dataset/nwpu/'
   train_annotation: 'train.json'
   val_annotation: 'val.json'
   random: false
 # dataset:
 #     name: 'rsicd'
-#     root: '/nethome/recpinfo/users/fibz/data/dataset/RSICD/'
+#     root: '/path/to/cluster_home/data/dataset/RSICD/'
 #     val_annotation: 'val.json'
 #     train_annotation: 'train.json'
 #     random: false
 name: test  # run name (--name): the run is saved in <output_dir>/<name>, with its config.yaml
-output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+output_dir: '/path/to/cluster_home/data/checkpoint/vlm-finetuning/'
 log_interval: 100

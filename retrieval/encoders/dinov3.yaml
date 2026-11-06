@@ -3,4 +3,4 @@ encoder:
   name: 'DINOv3'
   weight_path: 'facebook/dinov3-vitl16-pretrain-lvd1689m'
 data:
-  root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images/'
+  root: '/path/to/geo_images/'

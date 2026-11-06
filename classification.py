@@ -12,7 +12,7 @@ import os
     
 def evaluate_zs_nwpu(model_config, ):    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    labels = json.load(open('/nethome/recpinfo/users/fibz/data/dataset/nwpu/labels.json', 'r'))
+    labels = json.load(open(f'{os.environ["CLUSTER_HOME"]}/data/dataset/nwpu/labels.json', 'r'))
     texts = [f'a photo of a {e}' for e in labels.keys()]
 
     conf = OmegaConf.load(model_config)
@@ -20,7 +20,7 @@ def evaluate_zs_nwpu(model_config, ):
     model.eval()
 
     dataset = CaptionDataset(
-        '/nethome/recpinfo/users/fibz/data/dataset/nwpu/', 
+        f'{os.environ["CLUSTER_HOME"]}/data/dataset/nwpu/', 
         'val.json', 
         'nwpu',
         model.prepareImages, 

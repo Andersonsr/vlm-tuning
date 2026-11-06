@@ -280,7 +280,7 @@ class CaptionDataset(Dataset):
             raise ValueError("Invalid dataset value, supported datasets are: " + " ".join(datasets.keys()))
 
         print(self.root)
-        self.labels = json.load(open('/nethome/recpinfo/users/fibz/data/dataset/nwpu/labels.json', 'r'))
+        self.labels = json.load(open(f'{os.environ["CLUSTER_HOME"]}/data/dataset/nwpu/labels.json', 'r'))
 
         filepath = os.path.join(rootDir, annotationFile)
         print(f"loading file at: {filepath}")

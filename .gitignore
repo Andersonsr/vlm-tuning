@@ -21,3 +21,4 @@ idealTemperatureTest.py
 runTrainVarious.sh
 *__pycache__/
 *.pyc
+slurm-*.out

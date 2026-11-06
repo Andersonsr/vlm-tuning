@@ -187,7 +187,7 @@ def build_parser():
     parser.add_argument('--multipositive', action='store_true', default=None, help='train.multi_positive')
     parser.add_argument('--lr', default=None, type=float, help='train.learning_rate')
     parser.add_argument('--temp', type=float, default=None, help='initial temperature (model.temperature)')
-    parser.add_argument('--loss', type=str, default=None, choices=['contrastive', 'siglip'], help='train.loss')
+    parser.add_argument('--loss', type=str, default=None, choices=['contrastive', 'siglip', 'clip_refine'], help='train.loss (clip_refine: RaFA + HyCD, alpha and temperature in train.clip_refine)')
     parser.add_argument('--sigmoid_bias', type=float, default=None, help='initial sigmoid bias of the siglip loss (model.sigmoid_bias)')
     parser.add_argument('--batch_size', type=int, default=None, help='batch size per gpu (train.batch_size)')
     parser.add_argument('--vision_head', default=None, action='store_true', help='DINOtxt: train the vision head only (model.vision_head_only)')

@@ -22,6 +22,7 @@ import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 import random
 import math
+import copy
 
 
 GEO_INDICES = {0: 'classification', 1: 'composition', 2: 'texture', 3: 'porosity', 4:'diagenesis'}
@@ -307,19 +308,19 @@ def get_model(conf):
         tokenize = clip.tokenize
         
     elif modelFam == 'LongCLIP':
-        model, preprocess = longclip.load(f"/nethome/recpinfo/users/fibz/.cache/long-clip/{modelName}.pt", device='cpu')
+        model, preprocess = longclip.load(f"{os.environ['CLUSTER_HOME']}/.cache/long-clip/{modelName}.pt", device='cpu')
         tokenize = longclip.tokenize
 
     elif modelFam == 'RemoteCLIP':      
         model, _, preprocess = open_clip.create_model_and_transforms(modelName)
         tokenize = open_clip.get_tokenizer(modelName)
-        ckpt = torch.load(f"/nethome/recpinfo/users/fibz/.cache/remote-clip/RemoteCLIP-{modelName}.pt", map_location="cpu")
+        ckpt = torch.load(f"{os.environ['CLUSTER_HOME']}/.cache/remote-clip/RemoteCLIP-{modelName}.pt", map_location="cpu")
         model.load_state_dict(ckpt)
     
     elif modelFam == 'GeoRSCLIP':
         model, _, _ = open_clip.create_model_and_transforms(modelName, pretrained="openai")
         tokenize = open_clip.get_tokenizer(modelName)
-        checkpoint = torch.load(f"/nethome/recpinfo/users/fibz/.cache/geors-clip/{modelName}.pt", map_location="cpu")
+        checkpoint = torch.load(f"{os.environ['CLUSTER_HOME']}/.cache/geors-clip/{modelName}.pt", map_location="cpu")
         # print(checkpoint.keys())
         
         msg = model.load_state_dict(checkpoint, strict=False)
@@ -332,7 +333,7 @@ def get_model(conf):
         raise NotImplementedError()
     
     elif modelFam == 'DINOtxt':
-        weights = '/nethome/recpinfo/users/fibz/cache/dinov3_vitl16_dinotxt.pth'
+        weights = f'{os.environ["CLUSTER_HOME"]}/cache/dinov3_vitl16_dinotxt.pth'
         repo = 'facebookresearch/dinov3'
         model, tokenizer = torch.hub.load(repo, 'dinov3_vitl16_dinotxt_tet1280d20h24l', source='github', weights=weights)
         # backbone_weights: a DINOv3 SSL checkpoint whose backbone replaces DINO-TXT's; the pretrained text tower and
@@ -506,8 +507,22 @@ class CLIP(L.LightningModule):
 
             # print(self.model)
 
-        # 'contrastive' (softmax, CLIP) or 'siglip' (pairwise sigmoid)
+        # 'contrastive' (softmax, CLIP), 'siglip' (pairwise sigmoid) or 'clip_refine' (RaFA + HyCD)
         self.loss_type = conf.train.loss if hasattr(conf.train, 'loss') else 'contrastive'
+        self.teacher = None
+        if self.loss_type == 'clip_refine':
+            if self.family == 'DualEncoder':
+                raise ValueError('clip_refine distills the pretrained model, the DualEncoder heads are not pretrained')
+            refine = conf.train.get('clip_refine') or {}
+            self.refine_alpha = refine.get('alpha', 0.5)
+            self.refine_temperature = refine.get('temperature', 1.0)
+            # HyCD teacher: the pretrained model, frozen (the LoRA adapters start as zero updates, so it is the model
+            # before training). Kept out of the module tree: not trained, not saved in checkpoints, moved to the
+            # device in training_step
+            teacher = copy.deepcopy(self.model).eval()
+            for param in teacher.parameters():
+                param.requires_grad = False
+            object.__setattr__(self, 'teacher', teacher)
         sigmoid_bias = conf.model.sigmoid_bias if hasattr(conf.model, 'sigmoid_bias') else -10.
         train_bias = conf.model.train_bias if hasattr(conf.model, 'train_bias') else False
         self.logit_bias = torch.nn.Parameter(torch.ones(1) * sigmoid_bias, requires_grad=train_bias)
@@ -825,6 +840,21 @@ class CLIP(L.LightningModule):
         logits = logits + self.logit_bias
         return -F.logsigmoid(signs * logits).sum() / logits.shape[0]
 
+    def distill_loss(self, logits, teacher_logits, target):
+        """
+        HyCD (CLIP-Refine, Yamaguchi et al. 2025): KL divergence from the hybrid soft labels, alpha * ground truth +
+        (1 - alpha) * teacher softmax, to the student softmax. As the official code: logits are cosine similarities
+        divided by the temperature, batchmean reduction and the loss scaled by temperature^2.
+
+        Args:
+            logits:         [N_query, N_key] student cosine similarities
+            teacher_logits: [N_query, N_key] teacher cosine similarities
+            target:         [N_query, N_key] ground truth distribution (rows sum to 1)
+        """
+        t = self.refine_temperature
+        soft_labels = self.refine_alpha * target + (1 - self.refine_alpha) * F.softmax(teacher_logits / t, dim=-1)
+        return F.kl_div(F.log_softmax(logits / t, dim=-1), soft_labels, reduction='batchmean') * t ** 2
+
     def training_step(self, batch, batch_idx):
 
         if self.cooling is not None:
@@ -898,8 +928,52 @@ class CLIP(L.LightningModule):
         logit_scale = self.model.logit_scale.exp()
         self.log("temperature", logit_scale, batch_size=local_bs)
         
-        logits_per_image = logit_scale * pairwise_similarity(query_image_features, all_text_features)
-        logits_per_text = logit_scale * pairwise_similarity(all_image_features, query_text_features).T
+        similarity_per_image = pairwise_similarity(query_image_features, all_text_features)
+        similarity_per_text = pairwise_similarity(all_image_features, query_text_features).T
+        logits_per_image = logit_scale * similarity_per_image
+        logits_per_text = logit_scale * similarity_per_text
+
+        if self.loss_type == 'clip_refine':
+            # RaFA: the image and text features of a pair are pulled towards the same random vector from N(0, I)
+            reference = torch.randn_like(image_features)
+            loss_rafa = F.mse_loss(image_features, reference) + F.mse_loss(text_features, reference)
+
+            # HyCD: the same pairs as the student (queries against the gathered batch) through the frozen teacher
+            if next(self.teacher.parameters()).device != image_features.device:
+                self.teacher.to(image_features.device)
+            with torch.no_grad():
+                teacher_image = self.teacher.encode_image(batch['image'])
+                teacher_text = self.teacher.encode_text(batch['tokens'])
+                teacher_image = teacher_image / teacher_image.norm(dim=-1, keepdim=True)
+                teacher_text = teacher_text / teacher_text.norm(dim=-1, keepdim=True)
+                if world_size > 1:
+                    all_teacher_image = self.all_gather(teacher_image).reshape(-1, teacher_image.shape[-1])
+                    all_teacher_text = self.all_gather(teacher_text).reshape(-1, teacher_text.shape[-1])
+                else:
+                    all_teacher_image, all_teacher_text = teacher_image, teacher_text
+                query_teacher_image = teacher_image if self.local_loss else all_teacher_image
+                query_teacher_text = teacher_text if self.local_loss else all_teacher_text
+                teacher_per_image = query_teacher_image @ all_teacher_text.T
+                teacher_per_text = query_teacher_text @ all_teacher_image.T
+
+            # ground truth: the paired sample, or every sample of the same class (multi positive)
+            if self.multi_positive:
+                positive = query_class_labels[:, None] == all_class_labels[None, :]
+            else:
+                key_index = torch.arange(all_image_features.shape[0], device=image_features.device)
+                query_index = key_index
+                if self.local_loss and world_size > 1:
+                    query_index = torch.arange(local_bs, device=image_features.device) + self.trainer.global_rank * local_bs
+                positive = query_index[:, None] == key_index[None, :]
+            target = positive.float() / positive.sum(dim=1, keepdim=True)
+
+            loss_hycd = (self.distill_loss(similarity_per_image, teacher_per_image, target)
+                         + self.distill_loss(similarity_per_text, teacher_per_text, target)) / 2
+            loss = loss_rafa + loss_hycd
+            self.log("rafa_loss", loss_rafa, sync_dist=True, batch_size=local_bs)
+            self.log("hycd_loss", loss_hycd, sync_dist=True, batch_size=local_bs)
+            self.log("train_loss", loss, sync_dist=True, batch_size=local_bs, )
+            return loss
 
         if self.loss_type == 'siglip':
             self.log("sigmoid_bias", self.logit_bias, batch_size=local_bs)

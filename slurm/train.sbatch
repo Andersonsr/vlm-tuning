@@ -21,13 +21,12 @@
 #SBATCH --signal=SIGUSR1@180
 ##SBATCH --partition=tc
 
-export HTTP_PROXY=http://$USER:$PASSWORD@inet-sys.petrobras.com.br:804
-export HTTPS_PROXY=http://$USER:$PASSWORD@inet-sys.petrobras.com.br:804
-export NO_PROXY="127.0.0.1, localhost, petrobras.com.br, petrobras.biz"
-
 set -eo pipefail
 . ~/.bashrc
 conda activate cap
+# proxy host and NO_PROXY are set in the cap env (conda env config vars); USER and PASSWORD come from the submit shell
+export HTTP_PROXY=http://$USER:$PASSWORD@${PROXY_HOST:?set PROXY_HOST in the cap env}
+export HTTPS_PROXY=$HTTP_PROXY
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 set -u
@@ -35,8 +34,16 @@ set -u
 NAME=${NAME:?set NAME to the run name (folder under output_dir, same NAME to resume)}
 CONFIG=${CONFIG:-model/configs/dual_default.yaml}
 GPUS=${SLURM_NTASKS_PER_NODE:-4}
+# the configs have placeholders for the cluster paths: the job trains with a copy holding the real ones, from the cap
+# env (conda env config vars)
+CLUSTER_HOME=${CLUSTER_HOME:?set CLUSTER_HOME in the cap env}
+PROJECT_HOME=${PROJECT_HOME:?set PROJECT_HOME in the cap env}
+GEO_IMAGES=${GEO_IMAGES:?set GEO_IMAGES in the cap env}
 
 mkdir -p logs
+JOB_CONFIG=logs/config-$SLURM_JOB_ID.yaml   # logs/ is on the shared filesystem, every node reads it
+sed -e "s#/path/to/cluster_home#$CLUSTER_HOME#g" -e "s#/path/to/project_home#$PROJECT_HOME#g" \
+    -e "s#/path/to/geo_images#$GEO_IMAGES#g" "$CONFIG" > "$JOB_CONFIG"
 echo "$(date) job $SLURM_JOB_ID (restart ${SLURM_RESTART_COUNT:-0}) name=$NAME config=$CONFIG nodes=$SLURM_NNODES gpus/node=$GPUS"
 
-srun python trainLight.py --config "$CONFIG" --name "$NAME" --nnodes "$SLURM_NNODES" --gpus "$GPUS" --requeue "$@"
+srun python trainLight.py --config "$JOB_CONFIG" --name "$NAME" --nnodes "$SLURM_NNODES" --gpus "$GPUS" --requeue "$@"

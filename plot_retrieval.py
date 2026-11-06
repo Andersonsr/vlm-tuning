@@ -5,7 +5,7 @@ import pandas as pd
 
 
 if __name__ == '__main__':
-    root = '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+    root = f'{os.environ["CLUSTER_HOME"]}/data/checkpoint/vlm-finetuning/'
     experiments = [
         "GEO-DINO-48-t100-r12-composition",
         "GEO-DINO-48-t25-r12-composition", 

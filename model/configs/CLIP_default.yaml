@@ -22,7 +22,7 @@ model:
   sigmoid_bias: -10 # initial bias of the siglip loss
   train_bias: false # learn the sigmoid bias (siglip loss only)
 train:
-  loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
+  loss: 'contrastive' # 'contrastive' (CLIP softmax), 'siglip' (sigmoid) or 'clip_refine' (RaFA + HyCD, train.clip_refine: alpha 0.5, temperature 1.0)
   batch_size: 64
   gpus: 1  # gpus per node (--gpus)
   nnodes: 1  # (--nnodes)

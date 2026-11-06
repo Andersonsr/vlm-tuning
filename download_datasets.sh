@@ -13,13 +13,14 @@
 # Re-running is safe: finished datasets (marked with .complete) are skipped and interrupted downloads resume.
 # Archives are deleted after extraction (KEEP_ARCHIVES=1 to keep them in $DATA/_downloads).
 #
-# ImageNet needs an account at image-net.org, so it is not downloaded: point IMAGENET_DIR at an existing copy with
-# train/ and val/ (1,000 class folders each) and it is linked into $DATA/imagenet/images; its classnames.txt (used by
-# the four ImageNet variants too) is downloaded either way.
+# ImageNet: point IMAGENET_DIR at an existing copy with train/ and val/ (1,000 class folders each) and it is linked into
+# $DATA/imagenet/images. Without it only val/ is downloaded (the 50,000 validation images, about 6.4 GB), read out of
+# the 155 GB zip of the Kaggle competition imagenet-object-localization-challenge: that needs a Kaggle API token
+# (~/.kaggle/kaggle.json, or KAGGLE_USERNAME and KAGGLE_KEY) and the competition's rules accepted once on its website.
+# Its classnames.txt (used by the four ImageNet variants too) is downloaded either way.
 # The split_zhou_*.json files, classnames.txt and UCF101 are on Google Drive and need gdown (pip install gdown).
-# Where the original links are dead, known mirrors are tried (Caltech data repository, Zenodo, HuggingFace).
-# No longer downloadable (checked 2026-10): StanfordCars (ai.stanford.edu) and SUN397 (vision.princeton.edu); the
-# script says which files to put where, and a re-run finishes them.
+# Where the original links are dead, known mirrors are tried (Caltech data repository, Zenodo, HuggingFace, GitHub,
+# Kaggle). SUN397 needs about 80 GB free while it is unpacked (39 GB at the end).
 
 set -uo pipefail
 
@@ -32,7 +33,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --data) DATA="$2"; shift 2 ;;
         --list) printf '%s\n' "${ALL[@]}"; exit 0 ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
         *) SELECTED+=("$1"); shift ;;
     esac
 done
@@ -54,11 +55,18 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 fetch() {
     local out="$DL/$1"; shift
     [ -f "$out.ok" ] && { log "  have $(basename "$out")"; return 0; }
+    local before
     for url in "$@"; do
         log "  downloading $url"
-        if curl $([ -t 2 ] && echo -# || echo -sS) -L --fail --connect-timeout 30 --retry 3 --retry-delay 5 -C - -o "$out" "$url"; then
-            touch "$out.ok"; return 0
-        fi
+        while true; do
+            before=$(stat -c %s "$out" 2>/dev/null || echo 0)
+            if curl $([ -t 2 ] && echo -# || echo -sS) -L --fail --connect-timeout 30 --retry 3 --retry-delay 5 -C - -o "$out" "$url"; then
+                touch "$out.ok"; return 0
+            fi
+            # a connection dropped mid-transfer (which --retry does not cover): resume while the download progresses
+            [ "$(stat -c %s "$out" 2>/dev/null || echo 0)" -gt "$before" ] || break
+            log "  interrupted at $(( $(stat -c %s "$out") / 1000000 )) MB, resuming"; sleep 5
+        done
         rm -f "$out"
         log "  failed: $url"
     done
@@ -76,13 +84,18 @@ gfetch() {
 
 extract() {  # extract ARCHIVE DIR
     log "  extracting $(basename "$1")"
-    case "$1" in
+    if ! case "$1" in
         *.zip) unzip -q -o "$1" -d "$2" ;;
         *) tar -xf "$1" -C "$2" ;;
-    esac
+    esac; then  # a broken download (e.g. an error page saved under the archive's name): fetched again on a re-run
+        log "  $(basename "$1") is not a valid archive ($(head -c 100 "$1" | tr -cd '[:print:]' | cut -c1-60)): deleted"
+        rm -f "$1" "$1.ok"; return 1
+    fi
 }
 
 done_archive() { [ "${KEEP_ARCHIVES:-0}" = 1 ] || rm -f "$1" "$1.ok"; }
+
+PY=python3; "$PY" -c "" 2>/dev/null || PY=python  # for the scripts below (python3 may be a stub on Windows)
 
 classnames() {  # ImageNet's class names (CLIP), into $DATA/imagenet and the variants
     mkdir -p "$DATA/imagenet"
@@ -119,18 +132,19 @@ oxford_pets() {
 
 stanford_cars() {
     local d="$DATA/stanford_cars"; mkdir -p "$d"
-    # the ai.stanford.edu links have been down for a while; then get the files elsewhere (e.g. Kaggle) into $d
-    if ! { fetch cars_train.tgz http://ai.stanford.edu/~jkrause/car196/cars_train.tgz &&
-           fetch cars_test.tgz http://ai.stanford.edu/~jkrause/car196/cars_test.tgz &&
-           fetch car_devkit.tgz https://ai.stanford.edu/~jkrause/cars/car_devkit.tgz &&
-           fetch cars_test_annos_withlabels.mat http://ai.stanford.edu/~jkrause/car196/cars_test_annos_withlabels.mat; }; then
-        log "  StanfordCars is no longer served by Stanford: put cars_train/, cars_test/, devkit/ and"
-        log "  cars_test_annos_withlabels.mat in $d by hand (e.g. from Kaggle), then re-run for the split file"
-        gfetch "$d/split_zhou_StanfordCars.json" 1ObCFbaAgVu0I-k_Au-gIUcefirdAuizT
-        return 1
+    if fetch cars_train.tgz http://ai.stanford.edu/~jkrause/car196/cars_train.tgz &&
+       fetch cars_test.tgz http://ai.stanford.edu/~jkrause/car196/cars_test.tgz &&
+       fetch car_devkit.tgz https://ai.stanford.edu/~jkrause/cars/car_devkit.tgz &&
+       fetch cars_test_annos_withlabels.mat http://ai.stanford.edu/~jkrause/car196/cars_test_annos_withlabels.mat; then
+        for f in cars_train cars_test car_devkit; do extract "$DL/$f.tgz" "$d"; done_archive "$DL/$f.tgz"; done
+        cp "$DL/cars_test_annos_withlabels.mat" "$d/"; done_archive "$DL/cars_test_annos_withlabels.mat"
+    else  # ai.stanford.edu has been down for a while: a GitHub repository has the same files in stanford_cars/
+        fetch StanfordCars-Dataset-main.tar.gz \
+            https://github.com/jhpohovey/StanfordCars-Dataset/archive/refs/heads/main.tar.gz || return 1
+        extract "$DL/StanfordCars-Dataset-main.tar.gz" "$DL"
+        for f in "$DL"/StanfordCars-Dataset-main/stanford_cars/*; do rm -rf "$d/$(basename "$f")"; mv "$f" "$d/"; done
+        rm -rf "$DL/StanfordCars-Dataset-main"; done_archive "$DL/StanfordCars-Dataset-main.tar.gz"
     fi
-    for f in cars_train cars_test car_devkit; do extract "$DL/$f.tgz" "$d"; done_archive "$DL/$f.tgz"; done
-    cp "$DL/cars_test_annos_withlabels.mat" "$d/"; done_archive "$DL/cars_test_annos_withlabels.mat"
     gfetch "$d/split_zhou_StanfordCars.json" 1ObCFbaAgVu0I-k_Au-gIUcefirdAuizT
     [ -d "$d/cars_train" ] && [ -d "$d/cars_test" ] && [ -d "$d/devkit" ]
 }
@@ -147,8 +161,13 @@ flowers102() {
 }
 
 food101() {
-    fetch food-101.tar.gz http://data.vision.ee.ethz.ch/cvl/food-101.tar.gz
-    extract "$DL/food-101.tar.gz" "$DATA"; done_archive "$DL/food-101.tar.gz"
+    if fetch food-101.tar.gz http://data.vision.ee.ethz.ch/cvl/food-101.tar.gz && extract "$DL/food-101.tar.gz" "$DATA"; then
+        done_archive "$DL/food-101.tar.gz"
+    else  # behind some proxies ETH answers with a web page: a Kaggle copy has the same images/ (5.7 GB, no account)
+        fetch food41.zip https://www.kaggle.com/api/v1/datasets/download/kmader/food41
+        log "  extracting food41.zip (images/ and meta/, not the .h5 files)"
+        mkdir -p "$DATA/food-101"; unzip -q -o "$DL/food41.zip" -x '*.h5' -d "$DATA/food-101"; done_archive "$DL/food41.zip"
+    fi
     gfetch "$DATA/food-101/split_zhou_Food101.json" 1QK0tGi096I0Ba6kggatX1ee6dJFIcEJl
     [ -d "$DATA/food-101/images" ]
 }
@@ -164,17 +183,43 @@ fgvc_aircraft() {
 sun397() {
     local d="$DATA/sun397"; mkdir -p "$d"
     gfetch "$d/split_zhou_SUN397.json" 1y2RD81BYuiyvebdN-JymPfyWYcd8_MUq
-    # vision.princeton.edu no longer serves SUN397, and the HuggingFace copies drop the file names the split refers to
-    if ! { fetch SUN397.tar.gz http://vision.princeton.edu/projects/2010/SUN/SUN397.tar.gz &&
-           fetch Partitions.zip https://vision.princeton.edu/projects/2010/SUN/download/Partitions.zip; }; then
-        log "  SUN397 is offline at Princeton: put SUN397.tar.gz and Partitions.zip obtained elsewhere in $DL,"
-        log "  touch SUN397.tar.gz.ok and Partitions.zip.ok there, and re-run"
-        return 1
+    if [ ! -d "$d/SUN397" ]; then
+        # vision.princeton.edu no longer serves SUN397, and the HuggingFace copies drop the file names the split refers
+        # to. A Kaggle copy of the 108,754 original images (a 39 GB zip, no account needed) is flat
+        # (images/abbey_sun_x.jpg) with each image's class path in a CSV: the images are moved back into SUN397's folders
+        fetch sun397.zip https://www.kaggle.com/api/v1/datasets/download/alifshahariar/sun397-training-ready-dataset-csv-labels
+        rm -rf "$DL/sun397-processed"
+        extract "$DL/sun397.zip" "$DL"
+        log "  moving the images into SUN397's original folders"
+        "$PY" -I - "$DL/sun397-processed" "$d/SUN397.partial" <<'EOF'
+import csv, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+moved = 0
+with open(os.path.join(src, 'sun397-image-labels.csv'), newline='') as f:
+    for row in csv.DictReader(f):  # image: abbey_sun_x.jpg or apartment_building_outdoor_sun_x.jpg, class_name: abbey or apartment_building/outdoor
+        name, cls = row['image'], row['class_name']
+        prefix = cls.replace('/', '_') + '_'
+        assert name.startswith(prefix), (name, cls)
+        out_dir = os.path.join(dst, cls[0], *cls.split('/'))
+        os.makedirs(out_dir, exist_ok=True)
+        os.replace(os.path.join(src, 'images', name), os.path.join(out_dir, name[len(prefix):]))
+        moved += 1
+print(f'moved {moved} images')
+EOF
+        mv "$d/SUN397.partial" "$d/SUN397"
+        rm -rf "$DL/sun397-processed"; done_archive "$DL/sun397.zip"
     fi
-    extract "$DL/SUN397.tar.gz" "$d"; done_archive "$DL/SUN397.tar.gz"
-    extract "$DL/Partitions.zip" "$d"; done_archive "$DL/Partitions.zip"
-    if [ -d "$d/Partitions" ]; then mv "$d"/Partitions/*.txt "$d/" && rmdir "$d/Partitions"; fi  # the .txt files go in sun397/
-    [ -d "$d/SUN397" ]
+    log "  checking the images against the CoOp split"
+    "$PY" -I - "$d" <<'EOF'
+import json, os, sys
+root = sys.argv[1]
+images = sum(len(files) for _, _, files in os.walk(os.path.join(root, 'SUN397')))
+split = json.load(open(os.path.join(root, 'split_zhou_SUN397.json')))
+missing = [p for s in ('train', 'val', 'test') for p, _, _ in split[s] if not os.path.isfile(os.path.join(root, 'SUN397', p))]
+print(f'{images} images (expected 108754); split: {len(split["train"])} train, {len(split["val"])} val, '
+      f'{len(split["test"])} test, {len(missing)} missing')
+sys.exit(1 if missing or images != 108754 else 0)
+EOF
 }
 
 dtd() {
@@ -209,15 +254,139 @@ imagenet() {
     if [ -n "${IMAGENET_DIR:-}" ]; then
         for split in train val; do
             [ -d "$IMAGENET_DIR/$split" ] || { log "  no $IMAGENET_DIR/$split"; return 1; }
+            # e.g. the Kaggle copy's ILSVRC/Data/CLS-LOC/val is flat (its classes are in LOC_val_solution.csv)
+            [ "$(find "$IMAGENET_DIR/$split/" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1000 ] ||
+                { log "  $IMAGENET_DIR/$split does not have 1,000 class folders"; return 1; }
             ln -sfn "$(cd "$IMAGENET_DIR/$split" && pwd)" "$d/images/$split"
         done
         log "  linked $IMAGENET_DIR/{train,val} into $d/images"
-    else
-        log "  ImageNet needs an image-net.org account: extract train/ and val/ (class folders) into $d/images,"
-        log "  or re-run with IMAGENET_DIR=<folder with train/ and val/> to link an existing copy"
-        return 1
+    elif [ ! -d "$d/images/val" ]; then
+        # only the validation split, read out of the Kaggle competition's 155 GB zip with range requests: the zip's
+        # central directory gives where the 50,000 validation images are, and only that part of the zip is downloaded
+        log "  downloading the ImageNet validation split from Kaggle (no train/: set IMAGENET_DIR for it)"
+        "$PY" -I - "$d/images/val" "$DL/imagenet-val.part" <<'EOF'
+import base64, csv, http.client, io, json, os, sys, time, urllib.error, urllib.request, zipfile
+URL = 'https://www.kaggle.com/api/v1/competitions/data/download-all/imagenet-object-localization-challenge'
+RULES = 'https://www.kaggle.com/c/imagenet-object-localization-challenge/rules'
+out, part = sys.argv[1], sys.argv[2]
+
+user, key = os.environ.get('KAGGLE_USERNAME'), os.environ.get('KAGGLE_KEY')
+if not (user and key):
+    token = os.path.join(os.environ.get('KAGGLE_CONFIG_DIR', os.path.expanduser('~/.kaggle')), 'kaggle.json')
+    if not os.path.isfile(token):
+        sys.exit(f'no Kaggle API token: create one at https://www.kaggle.com/settings (API, Create New Token) and save it '
+                 f'as {token}, or set KAGGLE_USERNAME and KAGGLE_KEY')
+    with open(token) as f:
+        c = json.load(f)
+    user, key = c['username'], c['key']
+auth = {'Authorization': 'Basic ' + base64.b64encode(f'{user}:{key}'.encode()).decode()}
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args):
+        return None
+
+def resolve():  # Kaggle redirects to a signed storage URL that expires, so it is asked again after a failure
+    global url, headers
+    try:
+        urllib.request.build_opener(NoRedirect).open(urllib.request.Request(URL, headers={**auth, 'Range': 'bytes=0-0'}))
+        url, headers = URL, auth  # served directly
+    except urllib.error.HTTPError as e:
+        if e.code in (301, 302, 303, 307, 308):
+            url, headers = e.headers['Location'], {}
+        elif e.code in (401, 403):
+            sys.exit(f'Kaggle refused the download (HTTP {e.code}): check the API token and accept the rules at {RULES}')
+        else:
+            raise
+
+def get(start, end):  # bytes start..end (inclusive) of the zip
+    for attempt in range(5):
+        try:
+            return urllib.request.urlopen(urllib.request.Request(url, headers={**headers, 'Range': f'bytes={start}-{end}'}),
+                                          timeout=60)
+        except (OSError, http.client.HTTPException) as e:
+            print(f'  {e}, retrying', flush=True); time.sleep(10); resolve()
+    sys.exit('Kaggle is not answering: re-run to resume')
+
+def read(start, end):  # the same, read whole, also retrying a transfer cut short
+    for attempt in range(5):
+        try:
+            with get(start, end) as r:
+                return r.read()
+        except (OSError, http.client.HTTPException) as e:
+            print(f'  {e}, retrying', flush=True); time.sleep(10); resolve()
+    sys.exit('Kaggle is not answering: re-run to resume')
+
+class RemoteZip(io.RawIOBase):  # the zip as a seekable file: range requests, or the downloaded part once there is one
+    def __init__(self):
+        self.pos, self.local = 0, None
+        self.size = int(get(0, 0).headers['Content-Range'].split('/')[1])
+    def readable(self): return True
+    def seekable(self): return True
+    def tell(self): return self.pos
+    def seek(self, offset, whence=0):
+        self.pos = (offset, self.pos + offset, self.size + offset)[whence]
+        return self.pos
+    def readinto(self, b):
+        n = min(len(b), self.size - self.pos)
+        if n <= 0:
+            return 0
+        if self.local and self.start <= self.pos and self.pos + n <= self.start + self.length:
+            self.local.seek(self.pos - self.start); data = self.local.read(n)
+        else:
+            data = read(self.pos, self.pos + n - 1)
+        b[:len(data)] = data; self.pos += len(data)
+        return len(data)
+
+resolve()
+remote = RemoteZip()
+z = zipfile.ZipFile(io.BufferedReader(remote, 1 << 20))  # reads the central directory (about 1.4M entries)
+val = [i for i in z.infolist() if i.filename.startswith('ILSVRC/Data/CLS-LOC/val/') and not i.is_dir()]
+labels = {row['ImageId']: row['PredictionString'].split()[0]  # ImageId,PredictionString = "<wnid> x y x y ..."
+          for row in csv.DictReader(io.TextIOWrapper(z.open('LOC_val_solution.csv'), newline=''))}
+assert len(val) == len(labels) == 50000, (len(val), len(labels))
+
+# the validation images are stored next to each other: download from the first one's header to the last one's end
+# (plus room for the local headers' extra fields, which the central directory does not give)
+remote.start = min(i.header_offset for i in val)
+end = min(max(i.header_offset + 30 + len(i.orig_filename.encode()) + i.compress_size for i in val) + (1 << 16), remote.size)
+remote.length = end - remote.start
+images = sum(i.compress_size for i in val)
+if remote.length > 2 * images:
+    sys.exit(f'the validation images are spread over {remote.length / 1e9:.0f} GB of the zip, not {images / 1e9:.1f} GB: '
+             f'the zip is not laid out as expected')
+for attempt in range(10):
+    have = os.path.getsize(part) if os.path.exists(part) else 0
+    if have >= remote.length:
+        break
+    print(f'  {have / 1e9:.1f} of {remote.length / 1e9:.1f} GB', flush=True)
+    try:
+        with get(remote.start + have, end - 1) as r, open(part, 'ab') as f:
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                have += len(chunk)
+                if have % (1 << 30) < len(chunk):
+                    print(f'  {have / 1e9:.1f} of {remote.length / 1e9:.1f} GB', flush=True)
+    except (OSError, http.client.HTTPException) as e:
+        print(f'  {e}, resuming', flush=True); time.sleep(10); resolve()
+else:
+    sys.exit('download failed: re-run to resume')
+
+print('  extracting into class folders', flush=True)
+remote.local = open(part, 'rb')
+for i in val:
+    name = os.path.basename(i.filename)
+    os.makedirs(os.path.join(out + '.partial', labels[name.split('.')[0]]), exist_ok=True)
+    with open(os.path.join(out + '.partial', labels[name.split('.')[0]], name), 'wb') as f:
+        f.write(z.read(i))
+os.replace(out + '.partial', out)
+classes = os.listdir(out)
+print(f'  {sum(len(os.listdir(os.path.join(out, c))) for c in classes)} images in {len(classes)} classes')
+sys.exit(0 if len(classes) == 1000 else 1)
+EOF
+        done_archive "$DL/imagenet-val.part"
     fi
-    [ -d "$d/images/train" ] && [ -d "$d/images/val" ]
+    [ "$(find -L "$d/images/val/" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1000 ] ||
+        { log "  $d/images/val does not have 1,000 class folders"; return 1; }
 }
 
 imagenetv2() {

@@ -14,7 +14,7 @@ if __name__ == '__main__':
     parser.add_argument('--best', help='best epoch', action='store_true')
     args = parser.parse_args()
 
-    # /nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/GEO-random-LongCLIP-large14-LoRA-batch1024-original-composition-r4
+    # $CLUSTER_HOME/data/checkpoint/vlm-finetuning/GEO-random-LongCLIP-large14-LoRA-batch1024-original-composition-r4
     input_dir = args.dir
     output_path = os.path.join(input_dir, 'pytorch_model')
 
@@ -45,4 +45,4 @@ if __name__ == '__main__':
 
     print(f"Converted checkpoint saved to {output_path}")
 
-    # python consolidate.py --dir /nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/GEO-CLIP-large14-LoRA-batch512-original-composition/ --last
+    # python consolidate.py --dir $CLUSTER_HOME/data/checkpoint/vlm-finetuning/GEO-CLIP-large14-LoRA-batch512-original-composition/ --last

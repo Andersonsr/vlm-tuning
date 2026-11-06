@@ -346,4 +346,4 @@ if __name__ == '__main__':
     pd.concat(results).to_csv(csv_path, index=False)
     print('metrics saved at', csv_path)
 
-    # python evaluateModel.py --config /nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/<run>/config.yaml --split val
+    # python evaluateModel.py --config $CLUSTER_HOME/data/checkpoint/vlm-finetuning/<run>/config.yaml --split val

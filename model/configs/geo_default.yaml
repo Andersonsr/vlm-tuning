@@ -26,7 +26,7 @@ model:
   sigmoid_bias: -10 # initial bias of the siglip loss
   train_bias: false # learn the sigmoid bias (siglip loss only)
 train:
-  loss: 'contrastive' # 'contrastive' (CLIP softmax) or 'siglip' (sigmoid)
+  loss: 'contrastive' # 'contrastive' (CLIP softmax), 'siglip' (sigmoid) or 'clip_refine' (RaFA + HyCD, train.clip_refine: alpha 0.5, temperature 1.0)
   batch_size: 192 # * n_gpus
   gpus: 1
   nnodes: 1  # (--nnodes)
@@ -54,10 +54,10 @@ train:
 dataset:
   name: 'geo' # 'nwpu', 'coco', 'geo'
   multiresolution: false  # geo: train and validate on both resolutions (--multiresolution)
-  root: '/nethome/atena_projetos/fvlk/data/Dataset/v4/images'
-  train_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/train.csv'
-  val_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/val.csv'
-  test_annotation: '/nethome/atena_projetos/fibz/data/Dataset/v4/test.csv' 
+  root: '/path/to/geo_images'
+  train_annotation: '/path/to/project_home/data/Dataset/v4/train.csv'
+  val_annotation: '/path/to/project_home/data/Dataset/v4/val.csv'
+  test_annotation: '/path/to/project_home/data/Dataset/v4/test.csv' 
   random: true
   geometric_aug: false # random crop shift (up to 20%), horizontal flip and 90 degree rotations, no interpolation (train only)
   spectral_aug: false # equalization, contrast stretch, sharpen, dichromacy, color cast, vignette, brightness (train only)
@@ -68,5 +68,5 @@ dataset:
   geo_group: [2, 3] # user groups 
   resolutions: [256, 512] # image resolution for each magnifications
 name: test  # run name (--name): the run is saved in <output_dir>/<name>, with its config.yaml
-output_dir: '/nethome/recpinfo/users/fibz/data/checkpoint/vlm-finetuning/'
+output_dir: '/path/to/cluster_home/data/checkpoint/vlm-finetuning/'
 log_interval: 6
