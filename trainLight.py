@@ -4,7 +4,7 @@ import inspect
 import os
 import uuid
 from collections import defaultdict
-from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES, DistributedSingleDatasetBatchSampler
+from dataset.datasets import CaptionDataset, GeoDataset, GEO_INDICES, DistributedSingleDatasetBatchSampler, share_classes
 from dataset.cc3m import CC3MDataset
 from model.encoders import resize_transform, crop_transform
 import lightning as L
@@ -311,6 +311,8 @@ if __name__ == '__main__':
             
             
         if len(train_datasets) > 1:
+            # each gpu's batch may come from another dataset, the gathered classes must share one numbering
+            share_classes(train_datasets)
             combined_dataset = ConcatDataset(train_datasets)
             sampler = DistributedSingleDatasetBatchSampler(
                 dataset_lengths=[len(d) for d in train_datasets],

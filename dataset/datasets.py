@@ -33,6 +33,17 @@ def normalizeObj(obj):
     )
 
 
+def share_classes(datasets):
+    """Renumbers the classes of GeoDatasets with one shared numbering, the same (field, labels) gets the same class in
+    all of them. Each dataset numbers its own classes from 0, so batches of different datasets (the batches of the
+    other gpus in a step) would compare unrelated classes, e.g. in the multi positive loss over the gathered batch."""
+    keys = sorted({(d.geo_idx, labels) for d in datasets for labels in d.labels})
+    index = {key: i for i, key in enumerate(keys)}
+    for d in datasets:
+        d.classes = [index[(d.geo_idx, labels)] for labels in d.labels]
+        d.categories = [labels for _, labels in keys]  # labels of each class, by class index
+
+
 class DistributedSingleDatasetBatchSampler(BatchSampler):
     """
     BatchSampler for a ConcatDataset that:
@@ -176,6 +187,7 @@ class GeoDataset(Dataset):
   
         self.return_labels = return_labels   
         self.label_map = LABEL_MAP[geo_idx]
+        self.geo_idx = geo_idx
         self.images = []
         self.texts = []
         self.labels = []
@@ -215,7 +227,8 @@ class GeoDataset(Dataset):
             data = pd.DataFrame({'labels': obj_labels})
             data['labels'] = data['labels'].map(normalizeObj)
             self.labels = data['labels'].to_list()
-            _, self.categories  =  pd.factorize(data['labels'], sort=True)
+            codes, self.categories  =  pd.factorize(data['labels'], sort=True)
+            self.classes = codes.tolist()
 
         self.preprocess = preprocess
         self.tokenizer = tokenizer
@@ -239,7 +252,7 @@ class GeoDataset(Dataset):
         
         if self.return_labels:
             payload['labels'] = self.labels[index]
-            payload['class'] = self.categories.get_loc(self.labels[index])
+            payload['class'] = self.classes[index]
             
         return payload
 
