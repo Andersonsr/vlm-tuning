@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from omegaconf import OmegaConf
+from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))  # vlm-tuning: dataset, model
@@ -67,16 +68,23 @@ def load_samples(conf, split, fields):
         for crop, larger in [(high, True), (low, False)]:
             dataset = GeoDataset(conf.dataset.root, annotation, None, None, conf.dataset.geo_group, idx, size=high,
                                  randomImage=False, larger=larger)
-            items = []
+            items, small = [], 0
             for images, labels in zip(dataset.images, dataset.labels):
                 labels = normalize_labels({c: [str(v) for v in (vs if isinstance(vs, (tuple, list)) else [vs])]
                                            for c, vs in labels if c != 'no info'})
                 if not labels:
                     continue
-                items.append({'image': os.path.join(conf.dataset.root, f'{images[0]}.png'),
+                image = os.path.join(conf.dataset.root, f'{images[0]}.png')
+                with Image.open(image) as im:  # reads the header only
+                    if min(im.size) < crop:  # crop_transform cannot crop it
+                        small += 1
+                        continue
+                items.append({'image': image,
                               'key': json.dumps(labels, ensure_ascii=False, sort_keys=True),
                               'labels': {(c, v) for c, vs in labels.items() for v in vs}})
             samples[field][crop] = items
+            if small:
+                print(f'{field} {crop}px: {small} slides skipped, their image is smaller than {crop} px')
     return samples
 
 
